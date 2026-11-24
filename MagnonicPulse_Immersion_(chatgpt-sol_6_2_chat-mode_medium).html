@@ -1,0 +1,86 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>EVENT HORIZON – IMMERSION</title><style>*{box-sizing:border-box}body{margin:0;background:#03040a;color:#e3faff;font:14px system-ui;overflow:hidden}canvas{width:100vw;height:100vh;display:block}#intro{position:absolute;inset:0;display:grid;place-content:center;text-align:center;background:radial-gradient(ellipse,#142333e0,#03040af5);padding:30px}h1{font-size:clamp(32px,7vw,94px);letter-spacing:.12em;margin:0;font-weight:200}p{letter-spacing:.2em;color:#91b7c8}button{background:#123b4a;color:white;border:1px solid #55d9ef;padding:14px 30px;border-radius:8px;cursor:pointer;font:inherit}#hud{display:none;position:absolute;bottom:20px;left:24px;right:24px;justify-content:space-between;pointer-events:none;letter-spacing:.15em;text-shadow:0 0 8px black}#err{white-space:pre-wrap;max-width:700px;color:#ffb4a0;letter-spacing:0}small{color:#9bb3c4}</style><canvas id="c"></canvas><div id="intro"><h1>EVENT HORIZON / IMMERSION</h1><p>MAGNONIC // PULSE · WEBGPU · 6 MIN · 144 BPM</p><button id="start" disabled>Initializing GPU…</button><p id="err"></p><small>F fullscreen · M mute · SPACE pause · ← / → chapter · R restart · Q quality</small></div><script>
+const canvas=document.querySelector('#c'),intro=document.querySelector('#intro'),btn=document.querySelector('#start'),err=document.querySelector('#err');let device,ctx,pipeline,buffer,group,format,ac,master,epoch=0,playing=false,muted=false,lastBeat=-1,offset=0,paused=false,quality=720,starting=false;const bpm=144,beat=60/bpm,chapter=64*beat,total=13*chapter;const names=['01 / MAGNONIC GENESIS','02 / METAMORPHOSIS','03 / WORMHOLE','04 / FRACTAL CATHEDRAL','05 / HELIX ENGINE','06 / EVENT HORIZON','07 / FIRESTORM','08 / SHATTERED MATTER','09 / CHROMATIC ABYSS','10 / TOPOLOGICAL KNOT','11 / INFINITE ARCHITECTURE','12 / ATOMIC RESONANCE','13 / THE LAST LIGHT'];
+const shader=`
+struct U{res:vec2f,t:f32,b:f32}; @group(0) @binding(0) var<uniform> u:U;
+@vertex fn vs(@builtin(vertex_index) i:u32)->@builtin(position) vec4f{var p=array<vec2f,3>(vec2f(-1,-1),vec2f(3,-1),vec2f(-1,3));return vec4f(p[i],0,1);}
+fn rot(a:f32)->mat2x2f{return mat2x2f(cos(a),sin(a),-sin(a),cos(a));}
+fn pal(x:f32)->vec3f{return .52+.48*cos(6.28318*(vec3f(.0,.33,.67)+x));}
+fn hash(p:vec2f)->f32{return fract(sin(dot(p,vec2f(127.1,311.7)))*43758.5453);}
+fn noise(p:vec2f)->f32{let i=floor(p);let f=fract(p);let s=f*f*(3.-2.*f);return mix(mix(hash(i),hash(i+vec2f(1,0)),s.x),mix(hash(i+vec2f(0,1)),hash(i+vec2f(1,1)),s.x),s.y);}
+fn fb(p0:vec2f)->f32{var p=p0;var v=0.;var a=.5;for(var j=0;j<5;j++){v+=a*noise(p);p=rot(.7)*p*2.13+3.;a*=.5;}return v;}
+fn wave(p:vec2f,t:f32)->f32{let a=length(p-vec2f(1.7,0));let b=length(p+vec2f(1.7,0));return .28*(sin(8.*a-6.*t)*exp(-.16*a)+sin(11.*b-9.*t)*exp(-.18*b));}
+fn tor(p:vec3f,r:f32,w:f32)->f32{return length(vec2f(length(p.xz)-r,p.y))-w;}
+fn boxd(p:vec3f,s:vec3f)->f32{let q=abs(p)-s;return length(max(q,vec3f(0)))+min(max(q.x,max(q.y,q.z)),0.);}
+fn fractal(p0:vec3f,t:f32)->f32{var p=p0;var s=1.;for(var i=0;i<5;i++){p=abs(p);if(p.x<p.y){p=p.yxz;}if(p.x<p.z){p=p.zyx;}if(p.y<p.z){p=p.xzy;}p=p*2.65-vec3f(1.55,1.25,.85);let a=rot(.14*sin(t*.3))*p.xy;p=vec3f(a,p.z);s*=2.65;}return boxd(p,vec3f(.65))/s;}
+fn obj(p0:vec3f,id:i32,t:f32,k:f32)->f32{var p=p0;let a=rot(t*.19)*p.xz;p=vec3f(a.x,p.y,a.y);let b=rot(.3*sin(t*.2))*p.xy;p=vec3f(b,p.z);if(id==0){return max(abs(p.y-wave(p.xz,t))-.035,length(p.xz)-4.5);}if(id==1){return mix(tor(p,1.65,.43),abs(length(p)-1.8)-.12,.5+.5*sin(t*.34))+.09*sin(p.x*12.+t*3.)*sin(p.y*12.)*sin(p.z*12.);}
+if(id==3){return fractal(p,t);}
+if(id==4){let q=rot(p.y*2.4+t)*p.xz;return max(min(length(q-vec2f(.9,0)),length(q+vec2f(.9,0)))-.38,abs(p.y)-2.5)+.06*sin(p.y*24.-t*8.);}
+if(id==6){let age=smoothstep(0.,12.,t);let y=p.y+1.5;let stem=max(length(p.xz)-(.22+.26*age+.11*sin(y*12.)),max(-y,y-2.8*age));let cap=tor(p-vec3f(0,2.7*age-1.5,0),.25+1.5*age,.25+.5*age);let cloud=length((p-vec3f(0,2.7*age-1.5,0))*vec3f(.65,1.5,.65))-(.35+.65*age);return min(stem,min(cap,cloud))+.18*fb(p.xz*4.+p.y*2.+t*.2)-.08;}
+if(id==7){let q=abs(p)-vec3f(1.05);return min(boxd(q,vec3f(.38+.1*k)),tor(p,2.05,.09));}
+if(id==9){let a=atan2(p.z,p.x);let r=length(p.xz);return length(vec2f(r-1.45-.42*cos(a*5.+t),p.y-.55*sin(a*3.+t*.7)))-.24;}
+if(id==10){return min(fractal(p,t),min(tor(p,2.2,.08),tor(p.yzx,2.2,.08)));}
+return min(min(tor(p,1.85,.15+.08*k),tor(p.yzx,1.85,.13)),min(tor(p.zxy,1.85,.13),abs(length(p)-1.1-.12*sin(p.x*14.+t)*sin(p.y*14.))-.06));}
+fn tunnel(v:vec2f,t:f32,id:i32,k:f32)->vec3f{let q=rot(.2*sin(t*.3))*v+vec2f(.18*sin(t*.6),.12*cos(t*.5));let r=max(.018,length(q));let a=atan2(q.y,q.x);let z=1./r+t*1.8;let n=fb(vec2f(a*3.+sin(z*.6),z*.8));let ribs=pow(.5+.5*cos(z*5.+sin(a*8.+t)*1.8),12.);let spokes=pow(.5+.5*cos(a*12.+z*.8),10.);var c=pal(n*.55+z*.055+t*.025)*(.18+n*.65+ribs*.8+spokes*.35)*(1.-exp(-r*4.));if(id==5){let ring=exp(-abs(r-.46-.03*k)*35.);let disk=exp(-abs(q.y+.09*sin(q.x*9.))*15.)*exp(-abs(r-.85)*3.);c=pal(.08+n*.12)*disk*(1.+n*2.)+vec3f(1,.55,.15)*ring*2.;c*=smoothstep(.32,.43,r);c+=pal(.6+n*.3)*ribs*.09*smoothstep(.46,1.3,r);}if(id==8){let f=fb(vec2f(a*5.+z*.3,z*.7));c=pal(f*1.7+t*.045)*(.22+pow(.5+.5*cos(f*35.),5.)*1.2+ribs*.45)*smoothstep(.02,.28,r);}return c*(.8+.3*k);}
+fn world(p:vec3f,id:i32,t:f32,k:f32)->f32{
+ let local=t-f32(id)*26.666667;
+ if(id==2||id==5||id==8){
+  let q=vec3f(rot(p.z*.35+t*.12)*p.xy,p.z);
+  let wall=2.0+.28*sin(q.z*2.+t)+.16*cos(atan2(q.y,q.x)*7.+q.z*3.);
+  if(id==5){return min(abs(length(p)-1.25)-.035,tor(p,2.15,.13));}
+  return abs(length(q.xy)-wall)-.065;
+ }
+ return obj(p,id,select(t,max(0.,local),id==6),k);
+}
+fn field(p:vec3f,id:i32,t:f32,k:f32,m:f32)->f32{
+ let a=world(p,id,t,k);if(m<=0.||id==12){return a;}
+ let b=world(p,id+1,t,k);return mix(a,b,m);
+}
+fn sky(rd:vec3f,eye:vec3f,t:f32,id:i32,k:f32)->vec3f{
+ var c=vec3f(.006,.009,.025);let hue=f32(id)*.12;
+ for(var j=0;j<3;j++){
+  let fj=f32(j);let q=rd.xy/max(.32,abs(rd.z))*(1.6+fj*.7)+eye.xy*(.11+fj*.12)+vec2f(t*.025*(fj+1.),-t*.016);
+  let n=fb(rot(fj*.9+t*.018)*q*2.+vec2f(fj*8.,t*.04));
+  let ribbon=pow(max(0.,1.-abs(n-.52)*5.),3.);
+  c+=pal(hue+fj*.19+n*.3)*ribbon*(.085+fj*.035);
+  let grid=q*(35.+fj*43.);let cell=floor(grid);let f=fract(grid)-vec2f(hash(cell),hash(cell+9.));
+  let star=exp(-dot(f,f)*(65.+fj*35.))*pow(hash(cell+17.),7.);
+  c+=star*pal(hash(cell+3.))*(.55+k*.3);
+ }
+ return c;
+}
+@fragment fn fs(@builtin(position) pos:vec4f)->@location(0) vec4f{
+ let v=(pos.xy*2.-u.res)/u.res.y;let t=u.t;let sec=t/26.666667;let id=min(12,i32(sec));let f=fract(sec);let k=exp(-7.*fract(u.b));let m=smoothstep(.77,1.,f);
+ let phase=t*.19;let close=pow(.5+.5*sin(t*.22-1.2),3.);
+ let radius=mix(6.2,2.55,close);var eye=vec3f(radius*sin(phase),mix(2.8,.35,close)+.4*sin(t*.31),radius*cos(phase));
+ var camTarget=vec3f(.35*sin(t*.7),.3*cos(t*.51),0.);
+ let portal=select(0.,1.,id==2||id==8);let fly=portal*(smoothstep(0.,.12,f)*(1.-smoothstep(.72,.96,f)));
+ eye=mix(eye,vec3f(.35*sin(t*.9),.33*cos(t*.72),t*1.7),fly);camTarget=mix(camTarget,eye+vec3f(.4*cos(t*.9),-.3*sin(t*.72),1.),fly);
+ let fw=normalize(camTarget-eye);let rt=normalize(cross(fw,vec3f(0,1,0)));let up=cross(rt,fw);let uv=rot(.18*sin(t*.43))*v;
+ let rd=normalize(fw+uv.x*rt*(.76+.16*close)-uv.y*up*(.76+.16*close));
+ var travel=.035;var g=0.;var p=eye;var hit=false;
+ for(var i=0;i<100;i++){p=eye+rd*travel;let d=field(p,id,t,k,m);g+=.003/(.045+abs(d));if(abs(d)<.012){hit=true;break;}travel+=max(.012,abs(d)*.52);if(travel>25.){break;}}
+ let hue=(f32(id)+m)*.13+t*.009;var c=sky(rd,eye,t,id,k)+pal(hue)*min(.7,g*.09);
+ if(hit){let e=vec2f(.008,0);let n=normalize(vec3f(field(p+e.xyy,id,t,k,m)-field(p-e.xyy,id,t,k,m),field(p+e.yxy,id,t,k,m)-field(p-e.yxy,id,t,k,m),field(p+e.yyx,id,t,k,m)-field(p-e.yyx,id,t,k,m)));
+ let coord=p.xz*5.+p.y*vec2f(2.7,3.3);let tex=fb(coord);let dx=fb(coord+vec2f(.035,0))-tex;let dy=fb(coord+vec2f(0,.035))-tex;let nn=normalize(n+vec3f(dx,0,dy)*4.);
+ let l=normalize(vec3f(sin(t*.38)*3.,4.,cos(t*.38)*3.));let dif=max(0.,dot(nn,l));let rim=pow(1.-max(0.,dot(nn,-rd)),2.);let spec=pow(max(0.,dot(reflect(-l,nn),-rd)),36.);
+ let bands=pow(.5+.5*sin(length(p)*21.-t*7.+tex*12.),9.);let circuit=pow(.5+.5*cos(tex*75.+sin(p.y*9.)),16.);var base=pal(hue+tex*.55+length(p)*.045);if(id==6){base=mix(vec3f(.25,.035,.005),vec3f(1.8,.65,.08),tex);}
+ let surface=base*(.17+dif*.85+rim*.65+bands*(.25+k*.5))+spec*.9+pal(hue+.4)*circuit*.22; c=mix(surface,c,1.-exp(-travel*.045));}
+ if(id==5){let r=length(v);c+=vec3f(1.,.45,.12)*exp(-abs(r-.72)*32.)*.3;}
+ if(id==12){let r=length(v);let burst=pow(.5+.5*cos(r*35.-t*10.),12.);c+=pal(r*.4-t*.1)*burst*k*.7; c*=1.-smoothstep(.91,1.,f);}
+ c*=max(.35,1.-.13*dot(v,v));c=1.-exp(-max(c,vec3f(0))*1.35);return vec4f(pow(c,vec3f(.85)),1);}
+
+`;
+async function init(){try{if(!navigator.gpu)throw Error('WebGPU unavailable. Open in a WebGPU-enabled browser (Chrome/Edge or supported Firefox) with hardware acceleration.');const adapter=await navigator.gpu.requestAdapter();if(!adapter)throw Error('No WebGPU adapter found.');device=await adapter.requestDevice();ctx=canvas.getContext('webgpu');format=navigator.gpu.getPreferredCanvasFormat();ctx.configure({device,format,alphaMode:'opaque'});const mod=device.createShaderModule({code:shader});const info=await mod.getCompilationInfo();const errors=info.messages.filter(m=>m.type==='error');if(errors.length)throw Error(errors.map(m=>m.lineNum+': '+m.message).join('\n'));pipeline=await device.createRenderPipelineAsync({layout:'auto',vertex:{module:mod,entryPoint:'vs'},fragment:{module:mod,entryPoint:'fs',targets:[{format}]},primitive:{topology:'triangle-list'}});buffer=device.createBuffer({size:16,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});group=device.createBindGroup({layout:pipeline.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer}}]});btn.disabled=false;btn.textContent='START DEMO';device.lost.then(x=>{playing=false;intro.style.display='grid';err.textContent='GPU lost: '+x.message;});}catch(e){err.textContent=e.message;btn.textContent='Initialization failed';}}
+let noise,drums={},musicBus,delay;
+function voice(t,f,d,vol,kind='lead',pan=0){const g=ac.createGain(),filter=ac.createBiquadFilter(),p=ac.createStereoPanner();filter.type='lowpass';filter.Q.value=kind==='bass'?3:0.9;filter.frequency.setValueAtTime(kind==='bass'?1100:4000,t);filter.frequency.exponentialRampToValueAtTime(kind==='bass'?125:900,t+d);g.gain.setValueAtTime(.0001,t);g.gain.exponentialRampToValueAtTime(vol,t+Math.min(.035,d*.15));g.gain.exponentialRampToValueAtTime(.0001,t+d);p.pan.value=pan;filter.connect(g).connect(p).connect(musicBus);if(kind!=='bass')p.connect(delay);for(const det of (kind==='bass'?[0]:[-7,7])){const o=ac.createOscillator();o.type=kind==='pad'?'triangle':'sawtooth';o.frequency.value=f;o.detune.value=det;o.connect(filter);o.start(t);o.stop(t+d+.01);}}
+function drum(t,name,vol=1,pan=0){const src=ac.createBufferSource(),g=ac.createGain(),p=ac.createStereoPanner();src.buffer=drums[name];g.gain.value=vol;p.pan.value=pan;src.connect(g).connect(p).connect(master);src.start(t);}
+function makeDrums(){let seed=9287;const rnd=()=>{seed=(Math.imul(seed,1664525)+1013904223)|0;return seed/2147483648;};for(const [name,dur] of Object.entries({kick:.55,snare:.36,hat:.12,open:.45,impact:2.8,riser:2.5})){let b=ac.createBuffer(1,Math.ceil(ac.sampleRate*dur),ac.sampleRate),a=b.getChannelData(0),ph=0,low=0,prev=0;for(let i=0;i<a.length;i++){let x=i/ac.sampleRate,n=rnd();low+=.09*(n-low);let hi=n-prev;prev=n;let y=0;if(name==='kick'){ph+=2*Math.PI*(43+130*Math.exp(-x*35))/ac.sampleRate;y=Math.tanh(1.7*Math.sin(ph))*Math.exp(-x*9)+hi*.10*Math.exp(-x*120);}else if(name==='snare'){y=(n-low)*.55*Math.exp(-x*16)+Math.sin(x*1250)*.45*Math.exp(-x*28);}else if(name==='hat'||name==='open'){y=hi*.42*Math.exp(-x*(name==='hat'?48:12));}else if(name==='impact'){ph+=2*Math.PI*(28+65*Math.exp(-x*4))/ac.sampleRate;y=(Math.sin(ph)*.65+low*.7)*Math.exp(-x*2.1);}else {y=(n-low)*.35*Math.pow(x/dur,2)*Math.min(1,(dur-x)*35);}a[i]=Math.max(-1,Math.min(1,y))*Math.min(1,x*1500,(dur-x)*120);}drums[name]=b;}}
+function schedule(i,t){const s=Math.floor(i/64),j=i%64,step=i%4;const chords=[[0,3,7,10],[-4,0,3,7],[-2,2,5,9],[-5,-2,2,5]];const ch=chords[Math.floor(i/16)%4],root=55*2**(ch[0]/12);const breakdown=(s===3||s===5||s===6||s===10)&&j<16;const build=j>=56;const finale=s===12;const groove=s%3; if(!breakdown&&(s>0||step%2===0)){drum(t,'kick',.82);if(step%2===1)drum(t,'snare',.42);}if(!breakdown){for(let q=0;q<4;q++){if(q===0)continue;let f=root*(groove===1&&q===3?2:1);voice(t+beat*q/4,f,beat*.19,.19,'bass');}drum(t+beat*.5,'open',.19,.22);for(let q=0;q<(build?4:2);q++)drum(t+beat*(q+.25)/(build?4:2),'hat',.12,q%2?.5:-.5);}
+ if(step===0){for(let n of ch)voice(t,220*2**(n/12),beat*3.95,.026,'pad',n%2?.35:-.35);}
+ let patterns=[[0,2,1,3,2,1,0,3],[0,0,2,1,3,2,1,2],[2,1,3,0,1,3,2,0]];let pat=patterns[groove];if(s>0&&(!breakdown||step%2===0)){for(let q=0;q<(finale?4:2);q++){let n=ch[pat[(i*2+q)%8]];let f=440*2**((n+(i%8>=4?12:0))/12);voice(t+beat*q/(finale?4:2),f,beat*.38,.038+(finale?.018:0),'lead',q%2?.42:-.42);}}
+ if(j===0){drum(t,'impact',.7);}if(j===58)drum(t,'riser',.65);if(build&&j%2===1)for(let q=0;q<4;q++)drum(t+q*beat/4,'snare',.10+q*.035);if((s===6&&j===16)||(finale&&j===32))drum(t,'impact',1);if(finale&&j>=60)for(let n of ch)voice(t,440*2**(n/12),beat*3,.035,'pad');}
+async function start(at=0){if(starting)return;starting=true;try{if(ac)await ac.close();ac=new AudioContext();await ac.resume();master=ac.createGain();master.gain.value=muted?0:.58;let comp=ac.createDynamicsCompressor();comp.threshold.value=-16;master.connect(comp).connect(ac.destination);musicBus=ac.createGain();musicBus.gain.value=.8;musicBus.connect(master);delay=ac.createDelay(1);delay.delayTime.value=beat*.75;let feedback=ac.createGain();feedback.gain.value=.24;let wet=ac.createGain();wet.gain.value=.22;delay.connect(feedback).connect(delay);delay.connect(wet).connect(master);makeDrums();noise=ac.createBuffer(1,ac.sampleRate*4,ac.sampleRate);let a=noise.getChannelData(0);let seed=1234;for(let i=0;i<a.length;i++){seed=(Math.imul(seed,1664525)+1013904223)|0;a[i]=seed/2147483648;}offset=at;epoch=ac.currentTime+.12-at;lastBeat=Math.ceil(at/beat)-1;playing=true;paused=false;intro.style.display='none';}catch(e){err.textContent=e.message;intro.style.display='grid';}finally{starting=false;}}
+setInterval(()=>{if(!playing||paused||starting)return;let t=ac.currentTime-epoch;while((lastBeat+1)*beat<t+.35&&(lastBeat+1)*beat<total){lastBeat++;if(lastBeat*beat>=t-.07)schedule(lastBeat,Math.max(ac.currentTime+.005,epoch+lastBeat*beat));}},35);
+function frame(){requestAnimationFrame(frame);if(!playing||starting)return;let t=Math.max(0,ac.currentTime-epoch);if(t>=total){playing=false;intro.style.display='grid';btn.textContent='REPLAY DEMO';return;}let scale=Math.min(1,quality/innerHeight);let w=Math.max(1,Math.floor(innerWidth*scale)),h=Math.max(1,Math.floor(innerHeight*scale));if(canvas.width!==w||canvas.height!==h){canvas.width=w;canvas.height=h;}device.queue.writeBuffer(buffer,0,new Float32Array([w,h,t,t/beat]));let enc=device.createCommandEncoder();let pass=enc.beginRenderPass({colorAttachments:[{view:ctx.getCurrentTexture().createView(),loadOp:'clear',storeOp:'store',clearValue:{r:0,g:0,b:0,a:1}}]});pass.setPipeline(pipeline);pass.setBindGroup(0,group);pass.draw(3);pass.end();device.queue.submit([enc.finish()]);}
+btn.onclick=()=>start();addEventListener('keydown',async e=>{let k=e.key.toLowerCase();if(k==='f'){if(document.fullscreenElement)document.exitFullscreen();else document.documentElement.requestFullscreen().catch(()=>{});}if(k==='m'){muted=!muted;if(master)master.gain.setTargetAtTime(muted?0:.58,ac.currentTime,.03);}if(k==='q')quality=quality===480?720:quality===720?1080:quality===1080?1440:480;if(!device||btn.disabled)return;if(k==='r')start();if(e.code==='Space'){e.preventDefault();if(!playing)start();else if(!starting){paused=!paused;if(paused)await ac.suspend();else await ac.resume();}}if((k==='arrowleft'||k==='arrowright')&&playing&&!starting){let s=Math.floor(Math.max(0,ac.currentTime-epoch)/chapter);start(Math.max(0,Math.min(12,s+(k==='arrowright'?1:-1)))*chapter);}});init();requestAnimationFrame(frame);
+</script></html>
