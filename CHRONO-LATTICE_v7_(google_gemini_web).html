@@ -1,0 +1,809 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CHRONO-LATTICE v7 — AVDAI Benchmark</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%;
+    overflow: hidden;
+    background: #04060b;
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    user-select: none;
+  }
+  canvas {
+    display: block;
+    width: 100vw;
+    height: 100vh;
+  }
+  #overlay {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    background: radial-gradient(circle at center, rgba(8,14,26,0.55) 0%, rgba(3,5,10,0.88) 100%);
+    backdrop-filter: blur(6px);
+    z-index: 10;
+    transition: opacity 0.9s ease, visibility 0.9s ease;
+  }
+  #overlay.hidden {
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+  }
+  .badge {
+    font-size: 11px;
+    letter-spacing: 4px;
+    text-transform: uppercase;
+    color: #5eead4;
+    margin-bottom: 14px;
+    opacity: 0.9;
+  }
+  h1 {
+    font-size: clamp(28px, 5vw, 56px);
+    font-weight: 800;
+    letter-spacing: 8px;
+    color: #f8fafc;
+    text-shadow: 0 0 32px rgba(94, 234, 212, 0.35);
+    margin-bottom: 10px;
+    text-align: center;
+  }
+  .sub {
+    font-size: 13px;
+    letter-spacing: 2px;
+    color: #94a3b8;
+    margin-bottom: 34px;
+    text-align: center;
+  }
+  #startBtn {
+    padding: 15px 42px;
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: 4px;
+    text-transform: uppercase;
+    color: #030712;
+    background: linear-gradient(135deg, #5eead4 0%, #38bdf8 100%);
+    border: none;
+    border-radius: 999px;
+    cursor: pointer;
+    box-shadow: 0 0 30px rgba(56, 189, 248, 0.45);
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+  }
+  #startBtn:hover {
+    transform: scale(1.04);
+    box-shadow: 0 0 44px rgba(94, 234, 212, 0.7);
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="overlay">
+  <div class="badge">AVDAI BENCHMARK // v7.0</div>
+  <h1>CHRONO-LATTICE</h1>
+  <div class="sub">16 ARCHITECTURES &bull; CARVED CORRIDOR &amp; SDF AVOIDANCE &bull; HARMONIC SYNTH</div>
+  <button id="startBtn">LAUNCH DEMO</button>
+</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('c');
+  const overlay = document.getElementById('overlay');
+  const startBtn = document.getElementById('startBtn');
+
+  const gl = canvas.getContext('webgl2', { antialias: false, powerPreference: 'high-performance' });
+  if (!gl) {
+    document.body.innerHTML = '<div style="color:#fff;padding:40px;font-family:sans-serif">WebGL2 is required.</div>';
+    return;
+  }
+
+  function resize() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+    canvas.width = Math.floor(window.innerWidth * dpr);
+    canvas.height = Math.floor(window.innerHeight * dpr);
+    gl.viewport(0, 0, canvas.width, canvas.height);
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  const vsSrc = `#version 300 es
+    in vec2 aPos;
+    void main() {
+      gl_Position = vec4(aPos, 0.0, 1.0);
+    }
+  `;
+
+  // Shared exact SDF math between JS (camera navigation) and GLSL (raymarching)
+  // Plus a smooth carved flight corridor along the spine path so no closed wall ever blocks the camera,
+  // while open holes, arches, rings, and floating structures surround the flight path cleanly!
+  const fsSrc = `#version 300 es
+    precision highp float;
+
+    uniform vec2 uRes;
+    uniform float uTime;
+    uniform float uBeat;
+    uniform float uBass;
+    uniform float uMid;
+    uniform float uHigh;
+    uniform vec3 uCamPos;
+    uniform vec3 uCamFwd;
+    uniform vec3 uCamRight;
+    uniform vec3 uCamUp;
+
+    out vec4 fragColor;
+
+    mat2 rot(float a) {
+      float c = cos(a), s = sin(a);
+      return mat2(c, -s, s, c);
+    }
+
+    float sdBox(vec3 p, vec3 b) {
+      vec3 q = abs(p) - b;
+      return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0);
+    }
+
+    float sdTorus(vec3 p, vec2 t) {
+      vec2 q = vec2(length(p.xy) - t.x, p.z);
+      return length(q) - t.y;
+    }
+
+    float sdOctahedron(vec3 p, float s) {
+      p = abs(p);
+      return (p.x + p.y + p.z - s) * 0.57735027;
+    }
+
+    float smin(float a, float b, float k) {
+      float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
+      return mix(b, a, h) - k * h * (1.0 - h);
+    }
+
+    float smax(float a, float b, float k) {
+      return -smin(-a, -b, k);
+    }
+
+    // Exact spine centerline matching JS camera spine
+    vec2 spineXY(float z) {
+      return vec2(
+        sin(z * 0.055) * 2.2 + cos(z * 0.027) * 1.1,
+        cos(z * 0.048) * 1.6 + sin(z * 0.023) * 0.9
+      );
+    }
+
+    // 16 distinct architectural SDFs centered around spine(p.z)
+    float sceneArch(int id, vec3 p, float z, vec2 sp) {
+      vec3 q = vec3(p.xy - sp, p.z);
+
+      if (id == 0) {
+        // 0: Hexagonal Cathedral Ribbed Tunnel (open center)
+        float cz = mod(z + 4.0, 8.0) - 4.0;
+        vec2 a = abs(q.xy);
+        float hex = max(a.x * 0.866025 + a.y * 0.5, a.y) - 4.2;
+        float ring = max(abs(hex), abs(cz) - 0.55);
+        float pillars = length(abs(q.xy) - vec2(3.3, 2.2)) - 0.42;
+        return min(ring, pillars);
+      }
+      if (id == 1) {
+        // 1: Floating Megalith Archipelago & Crystal Ring
+        float cz = mod(z + 6.0, 12.0) - 6.0;
+        vec3 rp = vec3(q.xy, cz);
+        rp.xy *= rot(floor((z + 6.0) / 12.0) * 0.7 + uTime * 0.15);
+        float c1 = sdOctahedron(rp - vec3(2.9, 1.6, 0.0), 1.05 + uBass * 0.2);
+        float c2 = sdOctahedron(rp + vec3(2.8, 1.8, 1.5), 0.95);
+        float floorWave = q.y + 3.4 - sin(q.x * 0.7 + z * 0.3) * 0.45;
+        return min(min(c1, c2), floorWave);
+      }
+      if (id == 2) {
+        // 2: DNA Double-Helix Bridge
+        float ang = z * 0.42 + uTime * 0.4;
+        vec2 h1 = vec2(cos(ang), sin(ang)) * 3.1;
+        vec2 h2 = -h1;
+        float s1 = length(q.xy - h1) - 0.62;
+        float s2 = length(q.xy - h2) - 0.62;
+        float cz = mod(z + 2.5, 5.0) - 2.5;
+        vec3 bp = vec3(q.xy, cz);
+        bp.xy *= rot(ang);
+        float rung = sdBox(bp, vec3(3.1, 0.18, 0.18));
+        return min(min(s1, s2), rung);
+      }
+      if (id == 3) {
+        // 3: Open KIFS / Mandelbox Sanctuary (hollowed core)
+        float cz = mod(z + 5.0, 10.0) - 5.0;
+        vec3 fp = vec3(q.xy, cz);
+        fp.xy *= rot(0.35);
+        for (int i = 0; i < 3; i++) {
+          fp = abs(fp) - vec3(2.3, 2.1, 1.6);
+          fp.xy *= rot(0.52);
+          fp.yz *= rot(0.38);
+        }
+        return sdBox(fp, vec3(0.75, 0.75, 0.75));
+      }
+      if (id == 4) {
+        // 4: Concentric Astrolabe Gyroscopes
+        float cz = mod(z + 7.0, 14.0) - 7.0;
+        vec3 gp = vec3(q.xy, cz);
+        vec3 g1 = gp; g1.xz *= rot(uTime * 0.55);
+        vec3 g2 = gp; g2.yz *= rot(-uTime * 0.45);
+        float t1 = sdTorus(g1, vec2(3.6, 0.24));
+        float t2 = sdTorus(g2, vec2(2.7, 0.20));
+        return min(t1, t2);
+      }
+      if (id == 5) {
+        // 5: Infinite Gothic Cyber-Arches
+        float cz = mod(z + 4.5, 9.0) - 4.5;
+        vec2 ap = vec2(abs(q.x), q.y);
+        float arch = abs(length(ap - vec2(-1.4, 0.2)) - 4.5) - 0.35;
+        float frame = max(arch, abs(cz) - 0.48);
+        float floorP = q.y + 3.5;
+        return min(frame, floorP);
+      }
+      if (id == 6) {
+        // 6: Crystalline Geode Cavern
+        float cz = mod(z + 4.0, 8.0) - 4.0;
+        vec3 gp = vec3(q.xy, cz);
+        gp.xy *= rot(z * 0.08);
+        float shell = -(length(gp.xy) - 4.6);
+        vec3 spk = abs(gp) - vec3(2.6, 2.4, 1.4);
+        float spikes = sdOctahedron(spk, 1.35);
+        return max(shell, -spikes * 0.25) * 0.5 + min(spikes, max(shell, abs(cz) - 1.8)) * 0.5;
+      }
+      if (id == 7) {
+        // 7: Hypercube Tesseract Frame Matrix
+        float cz = mod(z + 6.0, 12.0) - 6.0;
+        vec3 hp = vec3(q.xy, cz);
+        hp.xy *= rot(uTime * 0.25 + floor((z + 6.0)/12.0));
+        float outer = max(sdBox(hp, vec3(3.4)), -sdBox(hp, vec3(2.95, 2.95, 4.0)));
+        float inner = max(sdBox(hp, vec3(2.3)), -sdBox(hp, vec3(1.95, 1.95, 3.2)));
+        return min(outer, inner);
+      }
+      if (id == 8) {
+        // 8: Liquid Chrome Sine-Wave Canyon
+        float wave = sin(q.x * 0.85 + uTime * 1.4) * cos(z * 0.45) * 0.85;
+        float floorS = q.y + 2.8 + wave;
+        float ceilS = -q.y + 3.4 + wave * 0.7;
+        float cz = mod(z + 5.0, 10.0) - 5.0;
+        float orb = length(vec3(q.x - sin(z * 0.3) * 2.5, q.y - 0.5, cz)) - 0.75;
+        return min(min(floorS, ceilS), orb);
+      }
+      if (id == 9) {
+        // 9: Dyson Sphere Orbital Rings
+        float cz = mod(z + 7.5, 15.0) - 7.5;
+        vec3 dp = vec3(q.xy, cz);
+        dp.xy *= rot(0.5);
+        dp.yz *= rot(0.35 + uTime * 0.2);
+        float r1 = sdTorus(dp, vec2(4.0, 0.26));
+        dp.xz *= rot(1.1);
+        float r2 = sdTorus(dp, vec2(3.1, 0.22));
+        return min(r1, r2);
+      }
+      if (id == 10) {
+        // 10: Origami Folded Ribbon Nebula
+        vec3 op = vec3(q.xy, z);
+        op.xy *= rot(z * 0.16 + sin(z * 0.1) * 0.5);
+        float r1 = sdBox(op - vec3(2.9, 0.0, 0.0), vec3(0.18, 1.6, 100.0));
+        float r2 = sdBox(op + vec3(2.9, 0.0, 0.0), vec3(0.18, 1.6, 100.0));
+        return min(r1, r2);
+      }
+      if (id == 11) {
+        // 11: Sierpinski-Style Frame Colonnade
+        float cz = mod(z + 5.0, 10.0) - 5.0;
+        vec3 sp = vec3(abs(q.xy), cz);
+        sp.xy -= vec2(2.5, 2.1);
+        float p1 = sdOctahedron(sp, 1.25);
+        float bar = sdBox(vec3(q.x, abs(q.y) - 3.3, cz), vec3(3.4, 0.22, 0.35));
+        return min(p1, bar);
+      }
+      if (id == 12) {
+        // 12: Wormhole Singularity & Accretion Torus
+        float cz = mod(z + 6.5, 13.0) - 6.5;
+        vec3 wp = vec3(q.xy, cz);
+        wp.xy *= rot(z * 0.25 - uTime * 0.6);
+        float disk = sdTorus(wp, vec2(3.3, 0.28));
+        float sat = length(wp - vec3(2.8, 0.0, 1.8)) - 0.55;
+        return min(disk, sat);
+      }
+      if (id == 13) {
+        // 13: Quantum Lattice Node Network
+        float cz = mod(z + 4.5, 9.0) - 4.5;
+        vec3 lp = vec3(abs(q.xy), cz);
+        vec3 nodeP = lp - vec3(2.6, 2.0, 0.0);
+        float node = length(nodeP) - (0.58 + uBeat * 0.12);
+        float beamX = sdBox(vec3(q.x, lp.y - 2.0, cz), vec3(2.6, 0.12, 0.12));
+        float beamY = sdBox(vec3(lp.x - 2.6, q.y, cz), vec3(0.12, 2.0, 0.12));
+        return min(node, min(beamX, beamY));
+      }
+      if (id == 14) {
+        // 14: Stained-Glass Rose Windows
+        float cz = mod(z + 6.0, 12.0) - 6.0;
+        vec2 rp = q.xy * rot(uTime * 0.25 + floor((z + 6.0)/12.0));
+        float ang = atan(rp.y, rp.x);
+        float r = length(rp);
+        float petals = abs(r - (3.1 + 0.55 * cos(ang * 8.0))) - 0.24;
+        return max(petals, abs(cz) - 0.35);
+      }
+      // 15: Harmonic Convergence Citadel (Finale)
+      float cz = mod(z + 5.5, 11.0) - 5.5;
+      vec3 fp = vec3(q.xy, cz);
+      fp.xy *= rot(0.4);
+      vec3 kf = abs(fp) - vec3(2.4, 2.2, 1.5);
+      kf.xy *= rot(0.45);
+      float fractal = sdBox(kf, vec3(0.68));
+      float halo = sdTorus(vec3(q.xy, cz), vec2(3.5, 0.22));
+      return min(fractal, halo);
+    }
+
+    vec2 map(vec3 p) {
+      float z = p.z;
+      vec2 sp = spineXY(z);
+
+      // Smooth 16-scene timeline: 9.0s per scene (144s cycle), 2.2s smooth cross-morph
+      float sceneDur = 9.0;
+      float tScene = uTime / sceneDur;
+      int idA = int(mod(floor(tScene), 16.0));
+      int idB = int(mod(floor(tScene) + 1.0, 16.0));
+      float blend = smoothstep(0.75, 1.0, fract(tScene));
+
+      float dA = sceneArch(idA, p, z, sp);
+      float dB = blend > 0.001 ? sceneArch(idB, p, z, sp) : dA;
+      float d = mix(dA, dB, blend);
+
+      // Guaranteed smooth open flight corridor around the spine so the camera ALWAYS flies
+      // cleanly through open space/holes and never clips through solid geometry
+      float corridorRadius = 1.65;
+      float corridor = -(length(p.xy - sp) - corridorRadius);
+      d = smax(d, corridor, 0.45);
+
+      // Material ID based on radial distance & periodic structure
+      float matId = smoothstep(2.0, 3.8, length(p.xy - sp));
+      return vec2(d, matId);
+    }
+
+    vec3 calcNormal(vec3 p) {
+      vec2 e = vec2(0.0035, 0.0);
+      return normalize(vec3(
+        map(p + e.xyy).x - map(p - e.xyy).x,
+        map(p + e.yxy).x - map(p - e.yxy).x,
+        map(p + e.yyx).x - map(p - e.yyx).x
+      ));
+    }
+
+    vec3 getPalette(float idx, float t) {
+      // Curated deep-contrast cinematic palettes (never washed-out pink)
+      vec3 a = vec3(0.10, 0.14, 0.22);
+      vec3 b = vec3(0.32, 0.45, 0.62);
+      vec3 c = vec3(1.0, 1.0, 1.0);
+      vec3 d = vec3(0.00, 0.18, 0.42) + idx * vec3(0.13, 0.09, 0.17);
+      return a + b * cos(6.28318 * (c * t + d));
+    }
+
+    void main() {
+      vec2 uv = (gl_FragCoord.xy - 0.5 * uRes) / uRes.y;
+      vec3 ro = uCamPos;
+      vec3 rd = normalize(uCamFwd + uv.x * uCamRight + uv.y * uCamUp);
+
+      float t = 0.0;
+      float matId = 0.0;
+      float glow = 0.0;
+      bool hit = false;
+
+      float sceneIdx = floor(uTime / 9.0);
+
+      for (int i = 0; i < 110; i++) {
+        vec3 p = ro + rd * t;
+        vec2 res = map(p);
+        float d = res.x;
+        matId = res.y;
+
+        // Subtle volumetric energy glow near edges
+        glow += exp(-abs(d) * 5.5) * 0.014;
+
+        if (d < 0.0035) {
+          hit = true;
+          break;
+        }
+        t += d * 0.85;
+        if (t > 68.0) break;
+      }
+
+      vec3 bgCol = mix(vec3(0.015, 0.025, 0.055), vec3(0.05, 0.09, 0.18), clamp(uv.y * 0.5 + 0.5, 0.0, 1.0));
+      vec3 accent = getPalette(sceneIdx, 0.25 + uMid * 0.15);
+      vec3 rimCol = getPalette(sceneIdx + 2.0, 0.65);
+
+      vec3 col = bgCol;
+
+      if (hit) {
+        vec3 p = ro + rd * t;
+        vec3 n = calcNormal(p);
+        vec3 v = -rd;
+
+        // Two-point studio lighting + camera headlamp
+        vec3 l1 = normalize(vec3(0.55, 0.75, -0.45));
+        vec3 l2 = normalize(-rd + vec3(0.0, 0.25, 0.0));
+
+        float diff1 = max(dot(n, l1), 0.0);
+        float diff2 = max(dot(n, l2), 0.0) * 0.65;
+        float fres = pow(1.0 - max(dot(n, v), 0.0), 3.2);
+
+        vec3 h1 = normalize(l1 + v);
+        float spec = pow(max(dot(n, h1), 0.0), 36.0);
+
+        // Ambient occlusion approximation along normal
+        float ao = clamp(map(p + n * 0.35).x / 0.35, 0.15, 1.0);
+
+        vec3 baseMat = mix(vec3(0.08, 0.12, 0.19), accent * 0.85, matId);
+        // Subtle structural grid lines for scale perception
+        float grid = smoothstep(0.92, 0.99, abs(sin(p.z * 1.5))) * 0.25;
+
+        col = baseMat * (0.18 + diff1 * 0.72 + diff2 * 0.45) * ao;
+        col += rimCol * fres * (0.85 + uBeat * 0.45);
+        col += vec3(0.85, 0.95, 1.0) * spec * 0.65;
+        col += accent * grid * (0.4 + uHigh * 0.8);
+
+        // Exponential depth fog for clear spatial depth
+        float fog = 1.0 - exp(-t * 0.032);
+        col = mix(col, bgCol, fog);
+      }
+
+      col += rimCol * glow * (0.65 + uBass * 0.55);
+
+      // ACES Filmic Tone Mapping & Gamma
+      col = (col * (2.51 * col + 0.03)) / (col * (2.43 * col + 0.59) + 0.14);
+      col = pow(clamp(col, 0.0, 1.0), vec3(0.4545));
+
+      fragColor = vec4(col, 1.0);
+    }
+  `;
+
+  function compile(type, src) {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+      console.error(gl.getShaderInfoLog(s));
+      return null;
+    }
+    return s;
+  }
+
+  const prog = gl.createProgram();
+  gl.attachShader(prog, compile(gl.VERTEX_SHADER, vsSrc));
+  gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, fsSrc));
+  gl.linkProgram(prog);
+  gl.useProgram(prog);
+
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+  const aPos = gl.getAttribLocation(prog, 'aPos');
+  gl.enableVertexAttribArray(aPos);
+  gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+
+  const uRes = gl.getUniformLocation(prog, 'uRes');
+  const uTime = gl.getUniformLocation(prog, 'uTime');
+  const uBeat = gl.getUniformLocation(prog, 'uBeat');
+  const uBass = gl.getUniformLocation(prog, 'uBass');
+  const uMid = gl.getUniformLocation(prog, 'uMid');
+  const uHigh = gl.getUniformLocation(prog, 'uHigh');
+  const uCamPos = gl.getUniformLocation(prog, 'uCamPos');
+  const uCamFwd = gl.getUniformLocation(prog, 'uCamFwd');
+  const uCamRight = gl.getUniformLocation(prog, 'uCamRight');
+  const uCamUp = gl.getUniformLocation(prog, 'uCamUp');
+
+  // Exact JS replica of spineXY + Look-Ahead Spring Camera
+  function spineXY(z) {
+    return [
+      Math.sin(z * 0.055) * 2.2 + Math.cos(z * 0.027) * 1.1,
+      Math.cos(z * 0.048) * 1.6 + Math.sin(z * 0.023) * 0.9
+    ];
+  }
+
+  let camPos = [0, 1.6, 0];
+  let camVel = [0, 0, 0];
+  let lookPos = [0, 1.6, 8];
+  let lookVel = [0, 0, 0];
+  let bankAngle = 0;
+
+  function updateCamera(dt, t) {
+    // Calm, steady, cinematic cruise speed (never rushing)
+    const speed = 4.6 + Math.sin(t * 0.22) * 0.55;
+    const targetZ = camPos[2] + speed * dt;
+    const sp = spineXY(targetZ);
+
+    // Gentle orbital weave strictly inside the 1.65-radius open corridor (max offset 0.72)
+    const weaveX = Math.sin(t * 0.42) * 0.68;
+    const weaveY = Math.cos(t * 0.34) * 0.52;
+
+    const desiredPos = [sp[0] + weaveX, sp[1] + weaveY, targetZ];
+
+    // Look-ahead target 7.5 units down the spine for smooth anticipation
+    const lookZ = targetZ + 7.5;
+    const lookSp = spineXY(lookZ);
+    const desiredLook = [
+      lookSp[0] + Math.sin((t + 1.4) * 0.42) * 0.45,
+      lookSp[1] + Math.cos((t + 1.4) * 0.34) * 0.35,
+      lookZ
+    ];
+
+    // Critically damped spring for silky Steadicam motion
+    const stiffness = 14.0;
+    const damping = 2.0 * Math.sqrt(stiffness);
+
+    for (let i = 0; i < 3; i++) {
+      const f = (desiredPos[i] - camPos[i]) * stiffness - camVel[i] * damping;
+      camVel[i] += f * dt;
+      camPos[i] += camVel[i] * dt;
+
+      const lf = (desiredLook[i] - lookPos[i]) * stiffness - lookVel[i] * damping;
+      lookVel[i] += lf * dt;
+      lookPos[i] += lookVel[i] * dt;
+    }
+
+    // Forward vector
+    let fx = lookPos[0] - camPos[0];
+    let fy = lookPos[1] - camPos[1];
+    let fz = lookPos[2] - camPos[2];
+    const fl = Math.hypot(fx, fy, fz) || 1;
+    fx /= fl; fy /= fl; fz /= fl;
+
+    // Gentle roll/banking proportional to horizontal curve
+    const targetBank = -fx * 0.28;
+    bankAngle += (targetBank - bankAngle) * Math.min(1, dt * 3.5);
+
+    const up0x = Math.sin(bankAngle);
+    const up0y = Math.cos(bankAngle);
+    const up0z = 0;
+
+    // Right = normalize(cross(fwd, up0))
+    let rx = fy * up0z - fz * up0y;
+    let ry = fz * up0x - fx * up0z;
+    let rz = fx * up0y - fy * up0x;
+    const rl = Math.hypot(rx, ry, rz) || 1;
+    rx /= rl; ry /= rl; rz /= rl;
+
+    // Up = cross(right, fwd)
+    const ux = ry * fz - rz * fy;
+    const uy = rz * fx - rx * fz;
+    const uz = rx * fy - ry * fx;
+
+    return { pos: camPos, fwd: [fx, fy, fz], right: [rx, ry, rz], up: [ux, uy, uz] };
+  }
+
+  // Harmonic Web Audio Synthesizer (Am - F - C - G, 122 BPM, strictly diatonic)
+  let audioCtx = null;
+  let started = false;
+  let startTime = 0;
+  let audioMetrics = { beat: 0, bass: 0, mid: 0, high: 0 };
+
+  function startAudio() {
+    if (audioCtx) return;
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+    const master = audioCtx.createGain();
+    master.gain.value = 0.42;
+
+    // Stereo delay for lush spatial depth
+    const delay = audioCtx.createDelay();
+    delay.delayTime.value = 0.368; // dotted eighth at 122 BPM
+    const fb = audioCtx.createGain();
+    fb.gain.value = 0.34;
+    const wet = audioCtx.createGain();
+    wet.gain.value = 0.28;
+
+    delay.connect(fb);
+    fb.connect(delay);
+    delay.connect(wet);
+    wet.connect(master);
+    master.connect(audioCtx.destination);
+
+    const bpm = 122;
+    const stepDur = 60 / bpm / 4; // 16th note
+    let step = 0;
+    let nextNoteTime = audioCtx.currentTime + 0.05;
+
+    // Pure harmonic progression: Am - F - C - G (MIDI notes)
+    const chords = [
+      { root: 45, triad: [57, 60, 64, 69], scale: [57, 60, 62, 64, 67, 69, 72, 76] }, // Am
+      { root: 41, triad: [53, 57, 60, 65], scale: [53, 57, 60, 62, 64, 65, 69, 72] }, // F
+      { root: 36, triad: [48, 52, 55, 60], scale: [60, 62, 64, 67, 69, 72, 74, 76] }, // C
+      { root: 43, triad: [55, 59, 62, 67], scale: [55, 59, 62, 64, 67, 69, 71, 74] }  // G
+    ];
+
+    const arpOrder = [0, 1, 2, 3, 2, 1, 2, 3];
+    const leadMelody = [
+      7, -1, 6, 5, -1, 4, 5, -1,
+      6, -1, 5, 4, -1, 3, 4, -1
+    ];
+
+    function midiToFreq(m) {
+      return 440 * Math.pow(2, (m - 69) / 12);
+    }
+
+    function playKick(t) {
+      const osc = audioCtx.createOscillator();
+      const g = audioCtx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(125, t);
+      osc.frequency.exponentialRampToValueAtTime(40, t + 0.14);
+      g.gain.setValueAtTime(0.65, t);
+      g.gain.exponentialRampToValueAtTime(0.001, t + 0.28);
+      osc.connect(g);
+      g.connect(master);
+      osc.start(t);
+      osc.stop(t + 0.3);
+    }
+
+    function playHat(t, open) {
+      const len = open ? 0.18 : 0.045;
+      const bufSize = Math.floor(audioCtx.sampleRate * len);
+      const b = audioCtx.createBuffer(1, bufSize, audioCtx.sampleRate);
+      const data = b.getChannelData(0);
+      for (let i = 0; i < bufSize; i++) data[i] = Math.random() * 2 - 1;
+
+      const src = audioCtx.createBufferSource();
+      src.buffer = b;
+      const hp = audioCtx.createBiquadFilter();
+      hp.type = 'highpass';
+      hp.frequency.value = 7500;
+      const g = audioCtx.createGain();
+      g.gain.setValueAtTime(open ? 0.12 : 0.07, t);
+      g.gain.exponentialRampToValueAtTime(0.001, t + len);
+      src.connect(hp);
+      hp.connect(g);
+      g.connect(master);
+      src.start(t);
+    }
+
+    function playBass(t, freq) {
+      const osc = audioCtx.createOscillator();
+      const filt = audioCtx.createBiquadFilter();
+      const g = audioCtx.createGain();
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(freq, t);
+      filt.type = 'lowpass';
+      filt.frequency.setValueAtTime(320, t);
+      filt.frequency.exponentialRampToValueAtTime(110, t + 0.22);
+      g.gain.setValueAtTime(0.38, t);
+      g.gain.exponentialRampToValueAtTime(0.001, t + 0.24);
+      osc.connect(filt);
+      filt.connect(g);
+      g.connect(master);
+      osc.start(t);
+      osc.stop(t + 0.26);
+    }
+
+    function playPad(t, notes, dur) {
+      notes.forEach(m => {
+        const osc = audioCtx.createOscillator();
+        const filt = audioCtx.createBiquadFilter();
+        const g = audioCtx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(midiToFreq(m), t);
+        filt.type = 'lowpass';
+        filt.frequency.value = 900;
+        g.gain.setValueAtTime(0.001, t);
+        g.gain.linearRampToValueAtTime(0.075, t + 0.35);
+        g.gain.linearRampToValueAtTime(0.001, t + dur);
+        osc.connect(filt);
+        filt.connect(g);
+        g.connect(master);
+        g.connect(delay);
+        osc.start(t);
+        osc.stop(t + dur + 0.05);
+      });
+    }
+
+    function playPluck(t, freq, amp, dur) {
+      const osc = audioCtx.createOscillator();
+      const filt = audioCtx.createBiquadFilter();
+      const g = audioCtx.createGain();
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(freq, t);
+      filt.type = 'lowpass';
+      filt.frequency.setValueAtTime(2200, t);
+      filt.frequency.exponentialRampToValueAtTime(420, t + dur);
+      g.gain.setValueAtTime(amp, t);
+      g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+      osc.connect(filt);
+      filt.connect(g);
+      g.connect(master);
+      g.connect(delay);
+      osc.start(t);
+      osc.stop(t + dur + 0.03);
+    }
+
+    function scheduler() {
+      while (nextNoteTime < audioCtx.currentTime + 0.12) {
+        const bar = Math.floor(step / 16);
+        const section = Math.floor(bar / 8) % 4; // 0: Intro, 1: Groove, 2: Breakdown, 3: Climax
+        const chord = chords[bar % 4];
+        const s16 = step % 16;
+
+        // Warm pad at start of each bar
+        if (s16 === 0) {
+          playPad(nextNoteTime, chord.triad, stepDur * 15.5);
+        }
+
+        // Kick (active in Groove & Climax)
+        if ((section === 1 || section === 3) && (s16 % 4 === 0)) {
+          playKick(nextNoteTime);
+        }
+
+        // Hi-hats
+        if (section >= 1 && (s16 % 2 === 1)) {
+          playHat(nextNoteTime, s16 % 4 === 2);
+        }
+
+        // Rolling octave bass
+        if (section !== 2 && (s16 % 2 === 0)) {
+          const oct = (s16 % 4 === 2) ? 12 : 0;
+          playBass(nextNoteTime, midiToFreq(chord.root + oct));
+        }
+
+        // Diatonic Arpeggiator
+        if (s16 % 2 === 0) {
+          const noteIdx = arpOrder[(s16 / 2) % arpOrder.length];
+          playPluck(nextNoteTime, midiToFreq(chord.triad[noteIdx] + 12), 0.11, stepDur * 1.8);
+        }
+
+        // Melodic Lead (strictly bound to current chord's scale)
+        if (section === 2 || section === 3) {
+          const deg = leadMelody[s16];
+          if (deg >= 0) {
+            const m = chord.scale[deg % chord.scale.length];
+            playPluck(nextNoteTime, midiToFreq(m), 0.13, stepDur * 2.6);
+          }
+        }
+
+        nextNoteTime += stepDur;
+        step++;
+      }
+      setTimeout(scheduler, 30);
+    }
+    scheduler();
+  }
+
+  startBtn.addEventListener('click', () => {
+    overlay.classList.add('hidden');
+    started = true;
+    startTime = performance.now();
+    startAudio();
+  });
+
+  let lastFrame = performance.now();
+  function frame(now) {
+    const dt = Math.min((now - lastFrame) * 0.001, 0.05);
+    lastFrame = now;
+
+    const t = started ? (now - startTime) * 0.001 : now * 0.0005;
+
+    // Musical beat envelope (122 BPM)
+    const bps = 122 / 60;
+    const beatPhase = (t * bps) % 1;
+    const beat = Math.pow(1.0 - beatPhase, 3.0);
+    const bass = started ? beat * 0.85 : 0.25;
+    const mid = 0.5 + 0.5 * Math.sin(t * 1.1);
+    const high = 0.5 + 0.5 * Math.cos(t * 2.3);
+
+    const cam = updateCamera(dt, t);
+
+    gl.uniform2f(uRes, canvas.width, canvas.height);
+    gl.uniform1f(uTime, t);
+    gl.uniform1f(uBeat, beat);
+    gl.uniform1f(uBass, bass);
+    gl.uniform1f(uMid, mid);
+    gl.uniform1f(uHigh, high);
+    gl.uniform3fv(uCamPos, cam.pos);
+    gl.uniform3fv(uCamFwd, cam.fwd);
+    gl.uniform3fv(uCamRight, cam.right);
+    gl.uniform3fv(uCamUp, cam.up);
+
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
