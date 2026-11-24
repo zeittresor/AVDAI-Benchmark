@@ -2,7 +2,7 @@
 
 The project is a master prompt for a human taste interpretation benchmark for scene style demo creations.
 
-Just use the "AUDIOVISUAL_DEMOSCENE_AI_BENCHMARK_(AVDAI-Benchmark)_prompt.md" and paste it in the prompt field of your LLM and wait for the output (the prompt is in germen but a not too lazy model should understand what to do) ;-)
+Just use the "AUDIOVISUAL_DEMOSCENE_AI_BENCHMARK_(AVDAI-Benchmark)_prompt.md" and paste it in the prompt field of your LLM and wait for the output (the prompt is in german but a not too lazy model should understand what to do) ;-)
 
 Oneshot scenedemo-experiments-16kb in HTML using AI
 
