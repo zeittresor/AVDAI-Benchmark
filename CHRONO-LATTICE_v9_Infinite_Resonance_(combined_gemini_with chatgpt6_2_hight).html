@@ -1,0 +1,869 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CHRONO-LATTICE v9 — Infinite Resonance</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%;
+    overflow: hidden;
+    background: #04060b;
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    user-select: none;
+  }
+  canvas {
+    display: block;
+    width: 100vw;
+    height: 100vh;
+  }
+  #overlay {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    background: radial-gradient(circle at center, rgba(8,14,26,0.55) 0%, rgba(3,5,10,0.88) 100%);
+    backdrop-filter: blur(6px);
+    z-index: 10;
+    transition: opacity 0.9s ease, visibility 0.9s ease;
+  }
+  #overlay.hidden {
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+  }
+  .badge {
+    font-size: 11px;
+    letter-spacing: 4px;
+    text-transform: uppercase;
+    color: #5eead4;
+    margin-bottom: 14px;
+    opacity: 0.9;
+  }
+  h1 {
+    font-size: clamp(28px, 5vw, 56px);
+    font-weight: 800;
+    letter-spacing: 8px;
+    color: #f8fafc;
+    text-shadow: 0 0 32px rgba(94, 234, 212, 0.35);
+    margin-bottom: 10px;
+    text-align: center;
+  }
+  .sub {
+    font-size: 13px;
+    letter-spacing: 2px;
+    color: #94a3b8;
+    margin-bottom: 34px;
+    text-align: center;
+  }
+  #startBtn {
+    padding: 15px 42px;
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: 4px;
+    text-transform: uppercase;
+    color: #030712;
+    background: linear-gradient(135deg, #5eead4 0%, #38bdf8 100%);
+    border: none;
+    border-radius: 999px;
+    cursor: pointer;
+    box-shadow: 0 0 30px rgba(56, 189, 248, 0.45);
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+  }
+  #startBtn:hover {
+    transform: scale(1.04);
+    box-shadow: 0 0 44px rgba(94, 234, 212, 0.7);
+  }
+  #quality { margin-top:18px; color:#cbd5e1; background:#101b2b; border:1px solid #38566e; border-radius:8px; padding:8px 12px; }
+  #help { margin-top:16px; color:#94a3b8; font-size:12px; text-align:center; line-height:1.8; }
+  #hud { position:fixed; top:12px; left:12px; color:#d5f7ff; background:#07111cbb; padding:10px; font:12px monospace; white-space:pre; pointer-events:none; display:none; }
+  body.playing { cursor:none; }
+  #error { color:#ffb7a5; white-space:pre-wrap; max-width:85vw; max-height:35vh; overflow:auto; font:12px monospace; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="overlay">
+  <div class="badge">INFINITE RESONANCE // v9.0</div>
+  <h1>CHRONO-LATTICE</h1>
+  <div class="sub">24 ARCHITECTURES &bull; INFINITE EVOLUTION &bull; GENERATIVE SOUNDTRACK</div>
+  <button id="startBtn">LAUNCH DEMO</button>
+  <select id="quality" aria-label="Render quality"><option value="480">480p</option><option value="720" selected>720p</option><option value="1080">1080p</option><option value="1440">1440p</option><option value="0">Native</option></select>
+  <div id="help">F Fullscreen · Space Pause · M Mute · R Restart · Q Quality · ←/→ Chapter · H Diagnostics · N New Universe · Esc Menu</div><div id="error"></div>
+</div><div id="hud"></div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('c');
+  const overlay = document.getElementById('overlay');
+  const startBtn = document.getElementById('startBtn');
+  const quality = document.getElementById('quality'), hud = document.getElementById('hud');
+  const fail = msg => { document.getElementById('error').textContent = String(msg); overlay.classList.remove('hidden'); document.body.classList.remove('playing'); startBtn.disabled = true; };
+  canvas.addEventListener('webglcontextlost', e => {e.preventDefault(); fail('WebGL context lost. Reload the file.');});
+
+  const gl = canvas.getContext('webgl2', { antialias: false, powerPreference: 'high-performance' });
+  if (!gl) {
+    document.body.innerHTML = '<div style="color:#fff;padding:40px;font-family:sans-serif">WebGL2 is required.</div>';
+    return;
+  }
+
+  function resize() {
+    const nativeH = Math.max(1, Math.round(window.innerHeight * (window.devicePixelRatio || 1)));
+    const h = Number(quality.value) || nativeH;
+    canvas.height = h;
+    canvas.width = Math.max(1,Math.round(h * window.innerWidth / Math.max(1,window.innerHeight)));
+    gl.viewport(0, 0, canvas.width, canvas.height);
+  }
+  window.addEventListener('resize', resize); quality.addEventListener('change',resize);
+  resize();
+
+  const vsSrc = `#version 300 es
+    in vec2 aPos;
+    void main() {
+      gl_Position = vec4(aPos, 0.0, 1.0);
+    }
+  `;
+
+  // Shared exact SDF math between JS (camera navigation) and GLSL (raymarching)
+  // Plus a smooth carved flight corridor along the spine path so no closed wall ever blocks the camera,
+  // while open holes, arches, rings, and floating structures surround the flight path cleanly!
+  const fsSrc = `#version 300 es
+    precision highp float;
+
+    uniform vec2 uRes;
+    uniform float uTime;
+    uniform float uBeat;
+    uniform float uBass;
+    uniform float uMid;
+    uniform float uHigh;
+    uniform vec3 uCamPos;
+    uniform vec3 uCamFwd;
+    uniform vec3 uCamRight;
+    uniform vec3 uCamUp;
+    uniform vec4 uRoute; // x/y amplitude, phase, safety radius
+    uniform vec4 uPart; // architecture A, B, transition, local progress
+    uniform vec4 uStyle; // focal length, warp, event pulse, intensity
+    uniform float uTravel;
+    uniform vec4 uEvolution; // weight, palette, deformation, material
+    uniform vec4 uEvent; // aurora, shockwave, shards, lens
+
+    out vec4 fragColor;
+
+    mat2 rot(float a) {
+      float c = cos(a), s = sin(a);
+      return mat2(c, -s, s, c);
+    }
+
+    float sdBox(vec3 p, vec3 b) {
+      vec3 q = abs(p) - b;
+      return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0);
+    }
+
+    float sdTorus(vec3 p, vec2 t) {
+      vec2 q = vec2(length(p.xy) - t.x, p.z);
+      return length(q) - t.y;
+    }
+
+    float sdOctahedron(vec3 p, float s) {
+      p = abs(p);
+      return (p.x + p.y + p.z - s) * 0.57735027;
+    }
+
+    float smin(float a, float b, float k) {
+      float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
+      return mix(b, a, h) - k * h * (1.0 - h);
+    }
+
+    float smax(float a, float b, float k) {
+      return -smin(-a, -b, k);
+    }
+
+    // Exact spine centerline matching JS camera spine
+    vec2 spineXY(float z) {
+      return vec2(
+        sin(z * 0.055) * 2.2 + cos(z * 0.027) * 1.1,
+        cos(z * 0.048) * 1.6 + sin(z * 0.023) * 0.9
+      );
+    }
+
+    vec2 routeXY(float z) {
+      return spineXY(z) + vec2(uRoute.x * sin(z*.115 + uRoute.z), uRoute.y * cos(z*.093 + uRoute.z*.73));
+    }
+    float spinField(vec3 p) {
+      return (sin(dot(p,vec3(2.2,.8,1.45))-uTime*3.1) + sin(dot(p,vec3(-1.35,1.9,2.7))-uTime*5.8) + .55*sin(length(p.xy-spineXY(p.z))*5.0+p.z*.65-uTime*2.0))/2.55;
+    }
+    // 16 distinct architectural SDFs centered around spine(p.z)
+    float sceneArch(int id, vec3 p, float z, vec2 sp) {
+      vec3 q = vec3(p.xy - sp, p.z);
+
+      if (id == 0) {
+        // 0: Hexagonal Cathedral Ribbed Tunnel (open center)
+        float cz = mod(z + 4.0, 8.0) - 4.0;
+        vec2 a = abs(q.xy);
+        float hex = max(a.x * 0.866025 + a.y * 0.5, a.y) - 4.2;
+        float ring = max(abs(hex)-0.18, abs(cz) - 0.55);
+        float pillars = length(abs(q.xy) - vec2(3.3, 2.2)) - 0.42;
+        return min(ring, pillars);
+      }
+      if (id == 1) {
+        // 1: Floating Megalith Archipelago & Crystal Ring
+        float cz = mod(z + 6.0, 12.0) - 6.0;
+        vec3 rp = vec3(q.xy, cz);
+        rp.xy *= rot(floor((z + 6.0) / 12.0) * 0.7 + uTime * 0.15);
+        float c1 = sdOctahedron(rp - vec3(2.9, 1.6, 0.0), 1.05 + uBass * 0.2);
+        float c2 = sdOctahedron(rp + vec3(2.8, 1.8, 1.5), 0.95);
+        float floorWave = q.y + 3.4 - sin(q.x * 0.7 + z * 0.3) * 0.45;
+        return min(min(c1, c2), floorWave);
+      }
+      if (id == 2) {
+        // 2: DNA Double-Helix Bridge
+        float ang = z * 0.42 + uTime * 0.4;
+        vec2 h1 = vec2(cos(ang), sin(ang)) * 3.1;
+        vec2 h2 = -h1;
+        float s1 = length(q.xy - h1) - 0.62;
+        float s2 = length(q.xy - h2) - 0.62;
+        float cz = mod(z + 2.5, 5.0) - 2.5;
+        vec3 bp = vec3(q.xy, cz);
+        bp.xy *= rot(ang);
+        float rung = sdBox(bp, vec3(3.1, 0.18, 0.18));
+        return min(min(s1, s2), rung);
+      }
+      if (id == 3) {
+        // 3: Open KIFS / Mandelbox Sanctuary (hollowed core)
+        float cz = mod(z + 5.0, 10.0) - 5.0;
+        vec3 fp = vec3(q.xy, cz);
+        fp.xy *= rot(0.35);
+        for (int i = 0; i < 3; i++) {
+          fp = abs(fp) - vec3(2.3, 2.1, 1.6);
+          fp.xy *= rot(0.52);
+          fp.yz *= rot(0.38);
+        }
+        return sdBox(fp, vec3(0.75, 0.75, 0.75));
+      }
+      if (id == 4) {
+        // 4: Concentric Astrolabe Gyroscopes
+        float cz = mod(z + 7.0, 14.0) - 7.0;
+        vec3 gp = vec3(q.xy, cz);
+        vec3 g1 = gp; g1.xz *= rot(uTime * 0.55);
+        vec3 g2 = gp; g2.yz *= rot(-uTime * 0.45);
+        float t1 = sdTorus(g1, vec2(3.6, 0.24));
+        float t2 = sdTorus(g2, vec2(2.7, 0.20));
+        return min(t1, t2);
+      }
+      if (id == 5) {
+        // 5: Infinite Gothic Cyber-Arches
+        float cz = mod(z + 4.5, 9.0) - 4.5;
+        vec2 ap = vec2(abs(q.x), q.y);
+        float arch = abs(length(ap - vec2(-1.4, 0.2)) - 4.5) - 0.35;
+        float frame = max(arch, abs(cz) - 0.48);
+        float floorP = q.y + 3.5;
+        return min(frame, floorP);
+      }
+      if (id == 6) {
+        // 6: Crystalline Geode Cavern
+        float cz = mod(z + 4.0, 8.0) - 4.0;
+        vec3 gp = vec3(q.xy, cz);
+        gp.xy *= rot(z * 0.08);
+        float shell = -(length(gp.xy) - 4.6);
+        vec3 spk = abs(gp) - vec3(2.6, 2.4, 1.4);
+        float spikes = sdOctahedron(spk, 1.35);
+        return max(shell, -spikes * 0.25) * 0.5 + min(spikes, max(shell, abs(cz) - 1.8)) * 0.5;
+      }
+      if (id == 7) {
+        // 7: Hypercube Tesseract Frame Matrix
+        float cz = mod(z + 6.0, 12.0) - 6.0;
+        vec3 hp = vec3(q.xy, cz);
+        hp.xy *= rot(uTime * 0.25 + floor((z + 6.0)/12.0));
+        float outer = max(sdBox(hp, vec3(3.4)), -sdBox(hp, vec3(2.95, 2.95, 4.0)));
+        float inner = max(sdBox(hp, vec3(2.3)), -sdBox(hp, vec3(1.95, 1.95, 3.2)));
+        return min(outer, inner);
+      }
+      if (id == 8) {
+        // 8: Liquid Chrome Sine-Wave Canyon
+        float wave = sin(q.x * 0.85 + uTime * 1.4) * cos(z * 0.45) * 0.85;
+        float floorS = q.y + 2.8 + wave;
+        float ceilS = -q.y + 3.4 + wave * 0.7;
+        float cz = mod(z + 5.0, 10.0) - 5.0;
+        float orb = length(vec3(q.x - sin(z * 0.3) * 2.5, q.y - 0.5, cz)) - 0.75;
+        return min(min(floorS, ceilS), orb);
+      }
+      if (id == 9) {
+        // 9: Dyson Sphere Orbital Rings
+        float cz = mod(z + 7.5, 15.0) - 7.5;
+        vec3 dp = vec3(q.xy, cz);
+        dp.xy *= rot(0.5);
+        dp.yz *= rot(0.35 + uTime * 0.2);
+        float r1 = sdTorus(dp, vec2(4.0, 0.26));
+        dp.xz *= rot(1.1);
+        float r2 = sdTorus(dp, vec2(3.1, 0.22));
+        return min(r1, r2);
+      }
+      if (id == 10) {
+        // 10: Origami Folded Ribbon Nebula
+        vec3 op = vec3(q.xy, 0.0);
+        op.xy *= rot(z * 0.16 + sin(z * 0.1) * 0.5);
+        float r1 = sdBox(op - vec3(2.9, 0.0, 0.0), vec3(0.18, 1.6, 100.0));
+        float r2 = sdBox(op + vec3(2.9, 0.0, 0.0), vec3(0.18, 1.6, 100.0));
+        return min(r1, r2);
+      }
+      if (id == 11) {
+        // 11: Sierpinski-Style Frame Colonnade
+        float cz = mod(z + 5.0, 10.0) - 5.0;
+        vec3 sp = vec3(abs(q.xy), cz);
+        sp.xy -= vec2(2.5, 2.1);
+        float p1 = sdOctahedron(sp, 1.25);
+        float bar = sdBox(vec3(q.x, abs(q.y) - 3.3, cz), vec3(3.4, 0.22, 0.35));
+        return min(p1, bar);
+      }
+      if (id == 12) {
+        // 12: Wormhole Singularity & Accretion Torus
+        float cz = mod(z + 6.5, 13.0) - 6.5;
+        vec3 wp = vec3(q.xy, cz);
+        wp.xy *= rot(z * 0.25 - uTime * 0.6);
+        float disk = sdTorus(wp, vec2(3.3, 0.28));
+        float sat = length(wp - vec3(2.8, 0.0, 1.8)) - 0.55;
+        return min(disk, sat);
+      }
+      if (id == 13) {
+        // 13: Quantum Lattice Node Network
+        float cz = mod(z + 4.5, 9.0) - 4.5;
+        vec3 lp = vec3(abs(q.xy), cz);
+        vec3 nodeP = lp - vec3(2.6, 2.0, 0.0);
+        float node = length(nodeP) - (0.58 + uBeat * 0.12);
+        float beamX = sdBox(vec3(q.x, lp.y - 2.0, cz), vec3(2.6, 0.12, 0.12));
+        float beamY = sdBox(vec3(lp.x - 2.6, q.y, cz), vec3(0.12, 2.0, 0.12));
+        return min(node, min(beamX, beamY));
+      }
+      if (id == 14) {
+        // 14: Stained-Glass Rose Windows
+        float cz = mod(z + 6.0, 12.0) - 6.0;
+        vec2 rp = q.xy * rot(uTime * 0.25 + floor((z + 6.0)/12.0));
+        float ang = atan(rp.y, rp.x);
+        float r = length(rp);
+        float petals = abs(r - (3.1 + 0.55 * cos(ang * 8.0))) - 0.24;
+        return max(petals, abs(cz) - 0.35);
+      }
+      if(id==16){ // braided magnetic flux toroids
+        float cz=mod(z+5.,10.)-5.; vec3 r=vec3(q.xy,cz);
+        r.xy=rot(z*.16+uTime*.28)*r.xy;
+        float a=atan(r.y,r.x), rad=length(r.xy);
+        float braid=length(vec2(rad-3.2-.42*cos(a*5.+uTime),cz-.65*sin(a*5.+uTime)))-.24;
+        float ring=sdTorus(r.xzy,vec2(3.5,.17)); return smin(braid,ring,.23);
+      }
+      if(id==17){ // hollow recursive coral spires
+        float cz=mod(z+6.,12.)-6.; vec3 r=vec3(q.xy,cz);r.xy=rot(z*.09)*r.xy;
+        vec3 f=r;for(int j=0;j<3;j++){f=abs(f)-vec3(2.1,1.9,1.35);f.xz=rot(.56)*f.xz;f.xy=rot(.42)*f.xy;}
+        float body=sdOctahedron(f,1.12);float pores=length(sin(r*2.4))-.64;
+        return smax(body,-pores*.28,.12);
+      }
+      if(id==18){ // magnetic liquid sheets with perforated interference nodes
+        vec3 r=q;r.xy=rot(.5*sin(z*.18+uTime*.23))*r.xy;
+        float w=sin(r.x*1.6+z*.42-uTime*1.4)*.56+sin(z*.71+r.x*.8+uTime*.8)*.32;
+        float sheets=abs(abs(r.y)-3.1-w)-.19;
+        float holes=length(vec2(mod(r.x+1.1,2.2)-1.1,mod(z+1.5,3.)-1.5))-.48;
+        return smax(sheets,-holes,.12);
+      }
+      if(id==19){ // orbital knot / expanding cage
+        float cz=mod(z+7.,14.)-7.;vec3 r=vec3(q.xy,cz);r.yz=rot(uTime*.27+z*.05)*r.yz;
+        float a=atan(r.y,r.x), rr=length(r.xy);
+        float knot=length(vec2(rr-3.1-.72*cos(3.*a),r.z-.92*sin(3.*a)))-.29;
+        float shell=abs(length(r)-4.1)-.12;float slots=abs(sin(a*6.+r.z*.7))-.19;
+        return smin(knot,max(shell,-slots*.4),.20);
+      }
+      if(id==20){ // folding crystalline circuit board
+        float cz=mod(z+4.,8.)-4.; vec3 r=vec3(q.xy,cz);r.xy=rot(floor((z+4.)/8.)*.63+uTime*.11)*r.xy;
+        vec3 f=abs(r)-vec3(2.8,2.15,1.5);f.xy=rot(.35)*f.xy;
+        float c=sdOctahedron(f,1.28);float inset=sdBox(f,vec3(.29,.9,.48));
+        float rails=length(abs(r.xy)-vec2(3.8,2.8))-.18;
+        return min(max(c,-inset),rails);
+      }
+      if(id==21){ // rotating gyroid membranes
+        vec3 r=q;r.xy=rot(z*.095+uTime*.12)*r.xy;
+        vec3 a=r*1.25+vec3(0,0,uTime*.25);
+        float gy=abs(dot(sin(a),cos(a.yzx)))-.22;
+        float bounds=abs(length(r.xy)-3.65)-1.3;
+        return max(gy*.38,bounds);
+      }
+      if(id==22){ // collapsing radial machine / aperture gates
+        float cz=mod(z+5.5,11.)-5.5;vec2 r=rot(uTime*.4+z*.04)*q.xy;
+        float a=atan(r.y,r.x),rad=length(r),fold=cos(a*9.+sin(cz*.7)*2.);
+        float blade=max(abs(rad-3.6-.65*fold)-.23,abs(cz)-.68-.4*fold);
+        float axle=sdTorus(vec3(r,cz),vec2(4.45,.18));return min(blade,axle);
+      }
+      if(id==23){ // inverted lattice: nested hollow diamond tunnels
+        float cz=mod(z+6.,12.)-6.;vec3 r=vec3(q.xy,cz);r.xy=rot(z*.13-uTime*.22)*r.xy;
+        float a=abs(sdOctahedron(r,5.2))-.15;
+        float b=abs(sdOctahedron(r,3.8))-.12;
+        float gaps=abs(sin(r.x*1.4+r.y*1.6+r.z*.8))-.30;
+        return max(min(a,b),-gaps*.38);
+      }
+      // 15: Harmonic Convergence Citadel (Finale)
+      float cz = mod(z + 5.5, 11.0) - 5.5;
+      vec3 fp = vec3(q.xy, cz);
+      fp.xy *= rot(0.4);
+      vec3 kf = abs(fp) - vec3(2.4, 2.2, 1.5);
+      kf.xy *= rot(0.45);
+      float fractal = sdBox(kf, vec3(0.68));
+      float halo = sdTorus(vec3(q.xy, cz), vec2(3.5, 0.22));
+      return min(fractal, halo);
+    }
+
+    vec2 map(vec3 p) {
+      float z = p.z;
+      vec2 sp = spineXY(z);
+
+      int idA = int(uPart.x), idB = int(uPart.y);
+      float blend = uPart.z;
+      // A continuous travelling deformation links both architectural fields.
+      vec3 wp=p;
+      float twist=sin(blend*3.14159265)*.30 + uEvolution.x*uEvolution.z*.45;
+      wp.xy=sp+rot(twist*sin(z*.28-uTime*.8))*(p.xy-sp);
+      float dA=sceneArch(idA,wp,z,sp);
+      float dB=blend>.001?sceneArch(idB,wp,z,sp):dA;
+      float d=mix(dA,dB,blend)-.32*sin(blend*3.14159265);
+      // Every generated chapter has continuously varying scale and deformation.
+      d+=uEvolution.x*.13*sin(z*.71+uTime*1.3+length(p.xy-sp)*2.6)*uEvolution.w;
+      if(uEvolution.x>.001 && uEvent.z>.001){
+        float cz=mod(z+4.,8.)-4.;vec3 k=vec3(p.xy-sp,cz);
+        k.xy=rot(z*.36+uTime*.7)*k.xy;
+        float fragment=sdOctahedron(abs(k)-vec3(3.2,2.9,1.6),.48+.40*uEvent.z);
+        d=smin(d,fragment+(1.-uEvent.z)*5.,.12);
+      }
+      // Physical-looking spin wave displacement, deliberately small for stable tracing.
+      d += .065*spinField(p)*(0.45+uBass*.55);
+      // Additional braided plasma conduits, only in selected chapters.
+      float ea = (idA==2 || idA==9 || idA==12 || idA==13 || idA==15) ? 1.0:0.0;
+      float eb = (idB==2 || idB==9 || idB==12 || idB==13 || idB==15) ? 1.0:0.0;
+      float energy=mix(ea,eb,blend);
+      if(energy>0.002) {
+        float a=z*.46-uTime*.85;
+        vec2 o=p.xy-sp;
+        float r=3.75+.30*sin(z*.24-uTime);
+        float strand=min(length(o-r*vec2(cos(a),sin(a))),length(o+r*vec2(cos(a),sin(a))))-.085+(1.-energy)*5.;
+        d=smin(d,strand,.14*energy+.001);
+      }
+      if(idA==15) {
+        float rise=smoothstep(.15,.72,uPart.w)*(1.-blend);
+        float zz=mod(z+5.5,11.)-5.5;
+        vec3 k=vec3(p.xy-sp,zz);
+        k.xy=rot(z*.14+uTime*.35)*k.xy;
+        float phase=z*.37+uTime*.8;
+        float satellites=length(k-vec3(3.1*cos(phase),3.1*sin(phase),0.))-(.12+.48*rise);
+        float orbit=sdTorus(k.xzy,vec2(3.15,.06+.11*rise));
+        d=smin(d,min(orbit,satellites)+(1.-rise)*4.,.16);
+      }
+      // Retain the original spine opening and add a second swept flight passage.
+      // At the camera position this field is >= uRoute.w, regardless of morph or audio.
+      float core=1.15-length(p.xy-sp);
+      float flight=uRoute.w-length(p.xy-routeXY(z));
+      d=smax(d,max(core,flight),.24);
+
+      // Material ID based on radial distance & periodic structure
+      float matId = smoothstep(2.0, 3.8, length(p.xy - sp));
+      return vec2(d, matId);
+    }
+
+    vec3 calcNormal(vec3 p) {
+      vec2 e = vec2(0.0035, 0.0);
+      return normalize(vec3(
+        map(p + e.xyy).x - map(p - e.xyy).x,
+        map(p + e.yxy).x - map(p - e.yxy).x,
+        map(p + e.yyx).x - map(p - e.yyx).x
+      ));
+    }
+
+    vec3 getPalette(float idx, float t) {
+      // Curated deep-contrast cinematic palettes (never washed-out pink)
+      vec3 a = vec3(0.10, 0.14, 0.22);
+      vec3 b = vec3(0.32, 0.45, 0.62);
+      vec3 c = vec3(1.0, 1.0, 1.0);
+      vec3 d = vec3(0.00, 0.18, 0.42) + idx * vec3(0.13, 0.09, 0.17);
+      return a + b * cos(6.28318 * (c * t + d));
+    }
+
+    float hash31(vec3 p) { p=fract(p*.1031); p+=dot(p,p.yzx+33.33); return fract((p.x+p.y)*p.z); }
+    float noise3(vec3 p) { vec3 i=floor(p), f=fract(p); f=f*f*(3.-2.*f); return mix(mix(mix(hash31(i),hash31(i+vec3(1,0,0)),f.x),mix(hash31(i+vec3(0,1,0)),hash31(i+vec3(1,1,0)),f.x),f.y),mix(mix(hash31(i+vec3(0,0,1)),hash31(i+vec3(1,0,1)),f.x),mix(hash31(i+vec3(0,1,1)),hash31(i+vec3(1,1,1)),f.x),f.y),f.z); }
+    vec3 atmosphere(vec3 ro,vec3 rd,vec3 accent,vec3 rim) {
+      vec3 q=rd*3.4+ro*.015+vec3(25.*sin(uTime*.001),-17.*sin(uTime*.001),0);
+      float n=noise3(q+noise3(q*1.8)*1.4)*.62+noise3(q*3.2)*.25+noise3(q*7.)*.13;
+      float ribbon=exp(-abs(rd.y+.28*sin(rd.x*4.+ro.z*.022+uTime*.15))*3.5);
+      float curtain=pow(.5+.5*sin(rd.x*9.+rd.y*5.+uTime*.32+2.8*n),5.);
+      return vec3(.012,.019,.038)+accent*pow(n,3.)*.65+rim*ribbon*n*.16+uEvent.x*mix(accent,rim,curtain)*curtain*.24;
+    }
+    // Three independently moving world-space particle planes. Depth tested against the ray hit.
+    vec3 motes(vec3 ro,vec3 rd,float depth,vec3 accent,vec3 rim) {
+      vec3 c=vec3(0);
+      for(int j=0;j<3;j++) {
+        float k=float(j), d=5.+k*13.;
+        float drift=sin(uTime*.001)*(700.+k*210.);
+        float layerZ=floor((ro.z+drift)/d)*d+d-drift;
+        if(rd.z<-.035) layerZ-=d;
+        if(abs(rd.z)<.035) continue;
+        float t=(layerZ-ro.z)/rd.z;
+        if(t<.15 || t>depth) continue;
+        vec2 xy=(ro.xy+rd.xy*t)*(.65+k*.25)+vec2(sin(uTime*.16+k),cos(uTime*.13+k))*.6;
+        vec2 cell=floor(xy), f=fract(xy)-.5;
+        float h=hash31(vec3(cell, floor((layerZ+drift)/d)+k*17.));
+        f-=vec2(h-.5,fract(h*43.17)-.5)*.68;
+        float star=exp(-dot(f,f)*(900.+k*500.));
+        float trail=exp(-abs(f.x)*55.-abs(f.y)*12.)*.14;
+        c+=(star+trail*uStyle.w)*step(.73,h)*mix(accent,rim,h)*(.7+uHigh*.8)*min(1.,t*.35);
+      }
+      return c;
+    }
+    void main() {
+      vec2 uv=(gl_FragCoord.xy-.5*uRes)/uRes.y;
+      float radial=dot(uv,uv);
+      vec2 lens=rot((uStyle.y*.38+uEvent.w*.22)*exp(-radial*3.))*uv*(1.+(uStyle.y*.17+uEvent.w*.12)*radial);
+      vec3 ro=uCamPos, rd=normalize(uCamFwd*uStyle.x+lens.x*uCamRight+lens.y*uCamUp);
+      float t=0., matId=0., glow=0.; bool hit=false;
+      float sceneIdx=mix(uPart.x,uPart.y,uPart.z);
+      vec3 accent=max(getPalette(sceneIdx,.25+uMid*.15),vec3(.035));
+      vec3 rimCol=max(getPalette(sceneIdx+2.,.65),vec3(.045));
+      vec3 altA=max(getPalette(uPart.x+uEvolution.y,.27+uMid*.15),vec3(.035));
+      vec3 altB=max(getPalette(uPart.y+uEvolution.y,.27+uMid*.15),vec3(.035));
+      accent=mix(accent,mix(altA,altB,uPart.z),uEvolution.x);
+      rimCol=mix(rimCol,max(getPalette(sceneIdx+2.+uEvolution.y,.65),vec3(.045)),uEvolution.x);
+      for(int i=0;i<118;i++) {
+        vec2 res=map(ro+rd*t); float d=res.x; matId=res.y;
+        glow+=exp(-abs(d)*6.)*.010;
+        if(d<.0035+ t*.00009) {hit=true;break;}
+        t+=clamp(d*.64,.004,3.0);
+        if(t>78.)break;
+      }
+      vec3 bg=atmosphere(ro,rd,accent,rimCol), col=bg;
+      if(hit) {
+        vec3 p=ro+rd*t, n=calcNormal(p), v=-rd;
+        float wave=spinField(p);
+        float tex=sin(p.x*18.+sin(p.z*9.))*sin(p.y*17.+p.z*7.);
+        vec3 micro=vec3(cos(p.x*18.+p.z*7.),sin(p.y*17.+p.z*8.),cos(p.z*16.+p.x*7.));
+        n=normalize(n+.085*(micro-n*dot(n,micro))*exp(-t*.065));
+        vec3 l1=normalize(vec3(.55+.35*sin(uTime*.7),.75,-.45)), l2=normalize(-rd+vec3(0,.25,0));
+        float diff=max(dot(n,l1),0.), diff2=max(dot(n,l2),0.);
+        float fres=pow(1.-clamp(dot(n,v),0.,1.),3.2);
+        float spec=pow(max(dot(n,normalize(l1+v)),0.),mix(23.,72.,matId));
+        float ao=clamp(map(p+n*.28).x/.28,.18,1.);
+        vec3 base=mix(vec3(.075,.105,.155),accent*.9,matId)*(1.+tex*.11*exp(-t*.07));
+        float grid=smoothstep(.94,.995,abs(sin(p.z*1.5)));
+        float veins=pow(max(0.,1.-abs(wave)),13.);
+        float circuit=pow(abs(sin(p.x*5.+p.z*1.7)*cos(p.y*5.-p.z*1.4)),12.);
+        base*=1.+uEvolution.x*(.15*tex+.26*circuit*uEvolution.w);
+        float shock=exp(-pow((p.z-uTravel-3.-uPart.w*18.)*.44,2.))*uStyle.z;
+        col=base*(.24+diff*.75+diff2*.42)*ao;
+        col+=rimCol*fres*(.75+uBeat*.48)+vec3(.85,.95,1.)*spec*.65;
+        col+=accent*(grid*.14+veins*(.10+.32*uStyle.w+.14*uBass));
+        col+=rimCol*shock*(.25+.7*veins);
+        float wavefront=exp(-pow((p.z-uTravel-2.-uPart.w*23.)*.38,2.));
+        col+=mix(rimCol,accent,.4)*uEvent.y*wavefront*(.3+.7*veins);
+        col+=accent*circuit*uEvolution.x*uEvolution.w*.22;
+        float metalA=(uPart.x==8. || uPart.x==9. || uPart.x==15.)?1.:0.;
+        float metalB=(uPart.y==8. || uPart.y==9. || uPart.y==15.)?1.:0.;
+        float metal=max(mix(metalA,metalB,uPart.z),uEvolution.x*uEvolution.w*.65);
+        if(metal>.001) col+=atmosphere(p,reflect(rd,n),accent,rimCol)*(.3+fres*.8)*metal;
+        col=mix(col,bg,1.-exp(-t*.027));
+      }
+      float depth=hit?t:78.;
+      col+=motes(ro,rd,depth,accent,rimCol);
+      // Low-cost drifting volumetric shafts integrated along the visible ray.
+      float mist=0.;
+      for(int i=0;i<5;i++) {
+        float z=(float(i)+.5)*min(depth,42.)/5.; vec3 p=ro+rd*z;
+        float f=noise3(p*.16+vec3(0,90.*sin(uTime*.001),-120.*sin(uTime*.001)));
+        mist+=pow(f,4.)*(.6+.4*sin(p.z*.4-uTime*1.7))*exp(-z*.027);
+      }
+      col+=rimCol*(glow*(.7+uBass*.55)+mist*.12*min(depth/10.,1.));
+      col+=accent*uStyle.z*.10*exp(-radial*2.);
+      col*=1.-.26*smoothstep(.12,1.45,radial);
+      // The convergence opens into the next universe, never into a black reset.
+      col+=rimCol*uEvent.y*.085*exp(-radial*2.);
+      col=max(col,vec3(0));
+      col=(col*(2.51*col+.03))/(col*(2.43*col+.59)+.14);
+      fragColor=vec4(pow(clamp(col,0.,1.),vec3(.4545)),1.);
+    }
+  `;
+
+  function compile(type, src) {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+      throw new Error(gl.getShaderInfoLog(s));
+    }
+    return s;
+  }
+
+  const prog = gl.createProgram();
+  try { gl.attachShader(prog,compile(gl.VERTEX_SHADER,vsSrc)); gl.attachShader(prog,compile(gl.FRAGMENT_SHADER,fsSrc)); gl.linkProgram(prog); if(!gl.getProgramParameter(prog,gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog)); gl.useProgram(prog); } catch(e) {fail(e);return;}
+
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+  const aPos = gl.getAttribLocation(prog, 'aPos');
+  gl.enableVertexAttribArray(aPos);
+  gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+
+  const uRes = gl.getUniformLocation(prog, 'uRes');
+  const uTime = gl.getUniformLocation(prog, 'uTime');
+  const uBeat = gl.getUniformLocation(prog, 'uBeat');
+  const uBass = gl.getUniformLocation(prog, 'uBass');
+  const uMid = gl.getUniformLocation(prog, 'uMid');
+  const uHigh = gl.getUniformLocation(prog, 'uHigh');
+  const uCamPos = gl.getUniformLocation(prog, 'uCamPos');
+  const uCamFwd = gl.getUniformLocation(prog, 'uCamFwd');
+  const uCamRight = gl.getUniformLocation(prog, 'uCamRight');
+  const uCamUp = gl.getUniformLocation(prog, 'uCamUp');
+
+  const locRoute=gl.getUniformLocation(prog,'uRoute'), locPart=gl.getUniformLocation(prog,'uPart'), locStyle=gl.getUniformLocation(prog,'uStyle'), locTravel=gl.getUniformLocation(prog,'uTravel');
+  const locEvolution=gl.getUniformLocation(prog,'uEvolution'),locEvent=gl.getUniformLocation(prog,'uEvent');
+  const BPM=138, STEP=60/BPM/4, BAR=STEP*16;
+  const names=['Cathedral awakening','Crystal drift','Helix acceleration','Fractal sanctuary','Astrolabe orbit','Gothic descent','Geode microsurface','Tesseract suspension','Chrome flood','Orbital ascent','Origami pursuit','Colonnade inversion','Wormhole collapse','Quantum discharge','Rose resonance','Harmonic convergence','Flux braid','Recursive coral','Liquid interference','Orbital knot','Crystal circuitry','Gyroid membranes','Aperture machine','Diamond inversion'];
+  // bars, peak forward speed, x/y excursion, bank, focal length, gaze, dolly excursion, aperture
+  const profiles=[
+    [8,5.5,.45,.55,.12,.95,.10,0,1.12], [12,7,2.0,1.4,.32,.85,.45,3,.87],
+    [12,12,1.8,1.7,.45,.76,.35,0,.92], [8,3.0,2.6,1.8,.22,1.24,.66,7,.78],
+    [12,6.2,2.5,2.2,.56,.86,.75,6,.92], [12,9.5,.9,2.45,.27,.90,.35,0,.83],
+    [12,2.4,2.65,2.35,.28,1.32,.78,10,.72], [8,2.0,1.8,1.4,.40,1.04,.75,9,.88],
+    [12,13.5,1.7,2.35,.35,.73,.40,0,.82], [12,7.5,2.7,2.0,.52,.76,.85,5,.94],
+    [8,10.0,2.2,1.55,.45,.77,.65,0,.82], [12,5.8,2.5,2.0,.50,1.05,.73,9,.80],
+    [12,16,.85,.95,.40,.66,.15,0,1.10], [12,10.5,2.3,2.0,.42,.79,.56,2,.89],
+    [12,4.5,2.5,1.8,.42,1.04,.70,7,.82], [16,12,1.6,1.55,.37,.76,.30,0,1.05]
+  ];
+  const starts=[0], zStarts=[0], BASE=4.2;
+  profiles.forEach(v=>{starts.push(starts.at(-1)+v[0]);zStarts.push(zStarts.at(-1)+(BASE+v[1])*.5*v[0]*BAR);});
+  const TOTAL=starts.at(-1)*BAR;
+  const clamp=(v,a=0,b=1)=>Math.max(a,Math.min(b,v)), mix=(a,b,t)=>a+(b-a)*t;
+  const smooth=(a,b,x)=>{const q=clamp((x-a)/(b-a));return q*q*(3-2*q);};
+  const norm=v=>{const d=Math.hypot(...v)||1;return v.map(x=>x/d);};
+  const cross=(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];
+  function spineXY(z){return [Math.sin(z*.055)*2.2+Math.cos(z*.027)*1.1,Math.cos(z*.048)*1.6+Math.sin(z*.023)*.9];}
+  const ACT_BARS=64, ACT_DUR=ACT_BARS*BAR, ACT_DISTANCE=ACT_DUR*7.0;
+  const introBars=starts.at(-1), introZ=zStarts.at(-1);
+  const styles=['Psytrance','Broken Circuit','Deep Space Ambient','Acid Machinery','Progressive Trance','Electro / Syncopation','Industrial Pulse','Melodic Synthwave'];
+  const styleOrders=[[0,1,2,3,4,5,6,7],[4,6,2,5,0,7,3,1],[7,0,3,2,6,4,1,5],[1,5,4,6,2,3,7,0]];
+  const cache=new Map();let seed=crypto.getRandomValues(new Uint32Array(1))[0];
+  function randomFor(a,salt=0){let x=(seed^Math.imul(a+1,0x9e3779b9)^Math.imul(salt+1,0x85ebca6b))>>>0;return ()=>{x=(x+0x6d2b79f5)>>>0;let y=x;y=Math.imul(y^y>>>15,y|1);y^=y+Math.imul(y^y>>>7,y|61);return ((y^y>>>14)>>>0)/4294967296;};}
+  function newUniverse(){seed=crypto.getRandomValues(new Uint32Array(1))[0];cache.clear();}
+  function act(n){
+    if(cache.has(n))return cache.get(n);
+    const rng=randomFor(n), pick=a=>a[Math.floor(rng()*a.length)];
+    const order=styleOrders[n%4], shift=n===0?order.indexOf(4):Math.floor(rng()*8), durations=[8,8,12,4,8,8,8,8];
+    // First geometry is always new, final geometry always legacy; avoid duplicate neighbours.
+    const used=new Set(), scenes=[];let start=0, weight=0;const actKey=n===0?0:pick([0,2,-2,3,-3,5]);
+    for(let j=0;j<8;j++){
+      const pool=j===0?[16,17,18,19,20,21,22,23]:j===7?Array.from({length:16},(_,i)=>i):Array.from({length:24},(_,i)=>i);
+      const id=n===0&&j===0?16:pick(pool.filter(v=>!used.has(v)));used.add(id);
+      const mode=order[(j+shift)%8], bars=durations[j], slow=mode===2;
+      const peak=slow?1.7+rng()*3.0:5.8+rng()*12.7;
+      const profile=[bars,peak,.65+rng()*2.25,.65+rng()*2.05,.14+rng()*.49,slow?1.13+rng()*.29:.65+rng()*.50,.2+rng()*.66,slow?8+rng()*10:rng()*5,.74+rng()*.42];
+      const mutation=[1,rng()*13-6.5,rng()*2-1,.18+rng()*.82];
+      const kind=Math.floor(rng()*4), event=Array.from({length:4},(_,k)=>k===kind?.65+rng()*.35:rng()*.12);
+      const a={id,mode,bars,start,profile,mutation,event,weight:bars*(BASE+peak)/2,kind,musicSeed:Math.floor(rng()*1e9),transpose:actKey,prog:n===0&&j===0?0:Math.floor(rng()*progressions.length)};
+      scenes.push(a);start+=bars;weight+=a.weight;
+    }
+    let z=0;for(const a of scenes){a.z=z;a.distance=a.weight/weight*ACT_DISTANCE;z+=a.distance;}
+    const result={scenes};cache.set(n,result);if(cache.size>4)cache.delete(cache.keys().next().value);return result;
+  }
+  function chapter(t){let i=0;while(i<15&&t>=starts[i+1]*BAR)i++;return i;}
+  function locate(t){
+    if(t<TOTAL){const i=chapter(t);return {index:i,start:starts[i]*BAR,dur:profiles[i][0]*BAR,id:i,mode:section[i],act:-1};}
+    const elapsed=Math.max(0,t-TOTAL), n=Math.floor((elapsed+1e-7)/ACT_DUR), local=elapsed-n*ACT_DUR, data=act(n);
+    let j=0;while(j<7&&local>=(data.scenes[j].start+data.scenes[j].bars)*BAR-1e-7)j++;
+    const a=data.scenes[j];return {...a,index:16+n*8+j,act:n,slot:j,start:TOTAL+n*ACT_DUR+a.start*BAR,dur:a.bars*BAR};
+  }
+  function chapterStart(i){if(i<16)return starts[Math.max(0,i)]*BAR;const n=Math.floor((i-16)/8),j=(i-16)%8;return TOTAL+n*ACT_DUR+act(n).scenes[j].start*BAR;}
+  function nextScene(c){return c.slot===7?act(c.act+1).scenes[0]:act(c.act).scenes[c.slot+1];}
+  function timeline(t){
+    if(t>=TOTAL)return endlessTimeline(t);
+
+    const i=chapter(t), a=profiles[i], following=i===15?act(0).scenes[0]:null, b=following?following.profile:profiles[i+1], dur=a[0]*BAR, e=clamp(t-starts[i]*BAR,0,dur), p=e/dur;
+    const morph=smooth(i===15?.82:.73,1,p), blend=(k)=>mix(a[k],b[k],morph);
+    const z=zStarts[i]+BASE*e+(a[1]-BASE)*dur*(p/2-Math.sin(2*Math.PI*p)/(4*Math.PI))+a[7]*Math.sin(Math.PI*p)**2*Math.sin(2*Math.PI*p);
+    const route=[blend(2),blend(3),(t*.19)%(200*Math.PI),blend(8)];
+    const xyAt=z=>{const sp=spineXY(z);return [sp[0]+route[0]*Math.sin(z*.115+route[2]),sp[1]+route[1]*Math.cos(z*.093+route[2]*.73)];};
+    const pos=[...xyAt(z),z], ahead=xyAt(z+5.5), center=spineXY(z+3.8);
+    const gaze=blend(6)*(.72+.28*Math.sin(t*.46));
+    const fwd=norm([mix(ahead[0],center[0],gaze)-pos[0],mix(ahead[1],center[1],gaze)-pos[1],mix(5.5,2.9,gaze)]);
+    const roll=blend(4)*Math.sin(t*.37+z*.037)+.14*fwd[0], right=norm(cross(fwd,[Math.sin(roll),Math.cos(roll),0])), up=cross(right,fwd);
+    const event=(i===8||i===12||i===13||i===15)?Math.exp(-p*12)+.70*Math.exp(-(((p-.75)*13)**2)):.15*Math.exp(-p*9);
+    const warp=(i===12?1.0: i===4||i===9?.35:0)*(Math.sin(Math.PI*p)**2)+morph*(1-morph)*.85;
+    return {i,index:i,act:-1,p,z,route,pos,fwd,right,up,part:[i,following?following.id:i+1,morph,p],style:[blend(5),warp,event,(i===6||i===7?.4: .8)+.2*Math.sin(t*.7)],evolution:following?[morph,following.mutation[1],following.mutation[2],following.mutation[3]]:[0,0,0,0],events:[0,0,0,0],music:section[i]};
+  }
+  // Fold the unbounded journey into a large, smoothly reversing coordinate domain.
+  // Avoid float precision loss on the GPU after days of continuous operation.
+  function foldTravel(distance){
+    const L=16000,W=90,x=((distance+L)%(4*L)+4*L)%(4*L),v=x<2*L?x-L:3*L-x,dir=x<2*L?1:-1;
+    const gap=L-Math.abs(v);if(gap>=W)return [introZ+v,dir];
+    return [introZ+Math.sign(v)*(L-W*.5-gap*gap/(2*W)),dir*gap/W];
+  }
+  function endlessTimeline(t){
+    const c=locate(t), b=nextScene(c), p=clamp((t-c.start)/c.dur), morph=smooth(.70,1,p), a=c.profile, blend=k=>mix(a[k],b.profile[k],morph);
+    // Each act advances a fixed total distance; variable velocity and dolly arcs are continuous at joins.
+    const raw=c.act*ACT_DISTANCE+c.z+BASE*c.dur*p+(c.distance-BASE*c.dur)*(p-Math.sin(2*Math.PI*p)/(2*Math.PI))+a[7]*Math.sin(Math.PI*p)**2*Math.sin(2*Math.PI*p);
+    const [z,heading]=foldTravel(raw);
+    const route=[blend(2),blend(3),(t*.19)%(200*Math.PI),blend(8)];
+    const xyAt=v=>{const sp=spineXY(v);return [sp[0]+route[0]*Math.sin(v*.115+route[2]),sp[1]+route[1]*Math.cos(v*.093+route[2]*.73)];};
+    const pos=[...xyAt(z),z], ahead=xyAt(z+5.5),center=spineXY(z+3.8),gaze=blend(6)*(.72+.28*Math.sin(t*.46));
+    const baseFwd=norm([mix(ahead[0],center[0],gaze)-pos[0],mix(ahead[1],center[1],gaze)-pos[1],mix(5.5,2.9,gaze)]);
+    const yaw=Math.PI*smooth(-.90,.90,-heading),cy=Math.cos(yaw),sy=Math.sin(yaw);
+    const fwd=[baseFwd[0]*cy+baseFwd[2]*sy,baseFwd[1],-baseFwd[0]*sy+baseFwd[2]*cy];
+    const roll=blend(4)*Math.sin(t*.37+z*.037)+.14*fwd[0],right=norm(cross(fwd,[Math.sin(roll),Math.cos(roll),0])),up=cross(right,fwd);
+    const envelope=Math.sin(Math.PI*p)**2, pulse=Math.exp(-(((p-.35)*8)**2))+.7*Math.exp(-(((p-.72)*12)**2));
+    const events=c.event.map((v,k)=>v*(k===0?envelope:k===1?pulse*envelope:k===2?envelope:envelope));
+    const evolution=c.mutation.map((v,k)=>mix(v,b.mutation[k],morph));
+    const warp=events[3]*.65+morph*.25*(1-morph), event=events[1]*.7;
+    return {i:c.id,index:c.index,act:c.act,p,z,route,pos,fwd,right,up,part:[c.id,b.id,morph,p],style:[blend(5),warp,event,mix(.8,.55,c.mode===2?envelope:0)+.2*Math.sin(t*.7)],evolution,events,music:c.mode};
+  }
+  // Original composition expanded into sixteen arranged chapters. All sounds are synthesized locally.
+  let ac=null, master=null, analyser=null, dry=null, padBus=null, delay=null, noise=null, origin=0, offset=0, nextStep=0, timer=0, playing=false, muted=false, generation=0;
+  let nodes=new Set(), graph=[], spectrum=new Uint8Array(512), bands=[0,0,0];
+  const hz=m=>440*Math.pow(2,(m-69)/12);
+  const chordBank=[ [33,[57,60,64,69]], [29,[53,57,60,65]], [36,[55,60,64,67]], [31,[55,59,62,67]], [38,[57,62,65,69]], [28,[56,59,64,68]], [31,[55,60,62,67]], [29,[53,57,64,69]] ];
+  const progressions=[[0,1,2,3],[0,4,1,5],[0,1,6,5],[4,1,0,3],[0,7,2,3],[4,0,1,5],[0,7,4,6],[1,2,0,5],[0,3,1,5],[0,2,4,5],[4,1,0,3],[0,7,2,5],[4,1,6,5],[0,1,3,5],[1,2,4,5],[0,1,2,3,4,1,5,0]];
+  const bassPatterns=[[2,6,10,14],[2,5,7,10,13,15],[1,2,3,5,6,7,9,10,11,13,14,15],[0,7,10],[2,6,9,14],[2,3,6,7,10,11,14,15]];
+  const arpPatterns=[[0,-1,1,-1,2,-1,3,-1,2,-1,1,-1,2,-1,3,-1],[0,2,1,3,1,2,0,3,2,1,3,2,0,1,2,3],[0,-1,-1,2,-1,-1,3,-1,1,-1,-1,2,-1,3,-1,-1],[3,-1,2,1,-1,0,-1,2,3,2,-1,1,0,-1,1,-1]];
+  const leadPatterns=[[3,-1,-1,2,-1,1,-1,-1,2,-1,3,-1,-1,2,1,-1],[1,-1,2,-1,3,-1,-1,-1,2,-1,0,-1,1,-1,-1,-1],[3,-1,2,-1,-1,1,-1,2,3,-1,-1,2,-1,0,-1,-1]];
+  const section=[0,1,2,0,2,2,0,0,3,2,3,1,0,3,1,3];
+  function initAudio(){
+    if(ac)return;
+    ac=new (window.AudioContext||window.webkitAudioContext)();
+    noise=ac.createBuffer(1,ac.sampleRate*2,ac.sampleRate);const data=noise.getChannelData(0);let seed=123456;for(let i=0;i<data.length;i++){seed=(Math.imul(seed,1664525)+1013904223)>>>0;data[i]=seed/2147483648-1;}
+    analyser=ac.createAnalyser();analyser.fftSize=1024;analyser.smoothingTimeConstant=.68;
+    master=ac.createGain();master.gain.value=muted?0:.65;analyser.connect(master);master.connect(ac.destination);
+  }
+  function connectGraph(){
+    dry=ac.createGain();padBus=ac.createGain();delay=ac.createDelay(1);delay.delayTime.value=STEP*3;
+    const feedback=ac.createGain(), wet=ac.createGain(), lp=ac.createBiquadFilter(), comp=ac.createDynamicsCompressor(), reverb=ac.createConvolver(), revGain=ac.createGain();
+    feedback.gain.value=.30;wet.gain.value=.19;lp.type='lowpass';lp.frequency.value=3200;
+    comp.threshold.value=-15;comp.knee.value=15;comp.ratio.value=4;comp.attack.value=.006;comp.release.value=.13;
+    const ir=ac.createBuffer(2,Math.floor(ac.sampleRate*1.65),ac.sampleRate);for(let ch=0;ch<2;ch++){const a=ir.getChannelData(ch),n=noise.getChannelData(0);for(let i=0;i<a.length;i++)a[i]=n[(i+ch*13097)%n.length]*(1-i/a.length)**3*.32;}
+    reverb.buffer=ir;revGain.gain.value=.13;padBus.connect(dry);padBus.connect(reverb);reverb.connect(revGain);revGain.connect(dry);
+    delay.connect(lp);lp.connect(feedback);feedback.connect(delay);lp.connect(wet);wet.connect(dry);dry.connect(comp);comp.connect(analyser);
+    graph=[dry,padBus,delay,feedback,wet,lp,comp,reverb,revGain];
+  }
+  function track(o,arr){nodes.add(o);o.onended=()=>{nodes.delete(o);for(const n of arr){try{n.disconnect();}catch{}}};}
+  function voice(t,f,d,amp,opt={}){
+    const o=ac.createOscillator(),g=ac.createGain(),filter=ac.createBiquadFilter(),pan=ac.createStereoPanner();
+    o.type=opt.type||'triangle';o.frequency.value=f;o.detune.value=opt.detune||0;
+    filter.type=opt.filter||'lowpass';filter.Q.value=opt.q||.65;
+    filter.frequency.setValueAtTime(opt.cut||2100,t);filter.frequency.exponentialRampToValueAtTime(opt.end||Math.max(130, f*1.2),t+d);
+    const attack=Math.min(d*.35,opt.attack||.009), rel=Math.min(d*.45,opt.release||.10);
+    g.gain.setValueAtTime(.0001,t);g.gain.linearRampToValueAtTime(amp,t+attack);g.gain.exponentialRampToValueAtTime(Math.max(.0002,amp*(opt.sustain||.62)),Math.max(t+attack+.001,t+d-rel));g.gain.exponentialRampToValueAtTime(.0001,t+d);
+    pan.pan.value=opt.pan||0;o.connect(filter);filter.connect(g);g.connect(pan);pan.connect(opt.pad?padBus:dry);if(opt.echo)pan.connect(delay);
+    o.start(t);o.stop(t+d+.015);track(o,[o,filter,g,pan]);
+  }
+  function kick(t,amp=.48){
+    const o=ac.createOscillator(),g=ac.createGain();o.frequency.setValueAtTime(148,t);o.frequency.exponentialRampToValueAtTime(48,t+.045);o.frequency.exponentialRampToValueAtTime(42,t+.18);
+    g.gain.setValueAtTime(.0001,t);g.gain.linearRampToValueAtTime(amp,t+.003);g.gain.exponentialRampToValueAtTime(.0001,t+.30);o.connect(g);g.connect(dry);o.start(t);o.stop(t+.31);track(o,[o,g]);
+    padBus.gain.cancelScheduledValues(t);padBus.gain.setValueAtTime(.52,t);padBus.gain.linearRampToValueAtTime(1,t+.28);
+    percussion(t,.018,.025,2300,0,'highpass');
+  }
+  function percussion(t,d,amp,f,panVal=0,type='highpass',rise=false){
+    const o=ac.createBufferSource(),g=ac.createGain(),filt=ac.createBiquadFilter(),pan=ac.createStereoPanner();o.buffer=noise;filt.type=type;filt.frequency.setValueAtTime(f,t);filt.Q.value=.85;
+    if(rise)filt.frequency.exponentialRampToValueAtTime(Math.min(14500,f*8),t+d);
+    g.gain.setValueAtTime(.0001,t);g.gain.linearRampToValueAtTime(amp,t+(rise?d*.84:.004));g.gain.exponentialRampToValueAtTime(.0001,t+d);pan.pan.value=panVal;o.connect(filt);filt.connect(g);g.connect(pan);pan.connect(dry);o.start(t,0,d);track(o,[o,filt,g,pan]);
+  }
+  function snare(t,amp=.13){percussion(t,.20,amp,1600,-.08,'bandpass');percussion(t+.012,.12,amp*.5,3900,.16,'highpass');voice(t,170,.095,.045,{type:'triangle',cut:700,end:150});}
+  function pad(t,notes,d,bright){for(let j=0;j<notes.length;j++){const f=hz(notes[j]);voice(t,f,d,.032,{type:'sawtooth',cut:bright?1600:850,end:450,attack:.32,release:.48,pan:(j-1.5)*.42,detune:-6,pad:true,echo:true,sustain:.8});voice(t,f,d,.024,{type:'triangle',cut:1100,end:540,attack:.38,release:.5,pan:(1.5-j)*.38,detune:6,pad:true,sustain:.8});}}
+  function bass(t,m,d,bright){const f=hz(m);voice(t,f,d,.20,{type:'sine',cut:300,end:110,attack:.005,release:.04});voice(t,f*2,d,.105,{type:'sawtooth',cut:bright?1750:760,end:155,q:2,attack:.006,release:.045});}
+  function lead(t,m,d,amp,panVal,bright){const f=hz(m);voice(t,f,d,amp,{type:'sawtooth',cut:bright?3800:2000,end:Math.max(450,f),q:1.2,detune:-7,pan:panVal,echo:true,release:.12});voice(t,f,d,amp*.65,{type:'triangle',cut:2300,end:Math.max(350,f),detune:7,pan:-panVal,echo:true});}
+  function arrange(step,t){
+    if(step>=introBars*16){arrangeInfinite(step,t);return;}
+    const bar=Math.floor(step/16), i=chapter(bar*BAR+.0001), localBar=bar-starts[i], s=step%16, mode=section[i];
+    const prog=progressions[i], chord=chordBank[prog[localBar%prog.length]], root=chord[0], notes=chord[1];
+    const opening=localBar===0, ending=localBar===profiles[i][0]-1, fill=localBar%4===3;
+    if(s===0){pad(t,notes,BAR*.98,mode>=2);if(opening&&i>0){percussion(t,.85,.12,350,0,'lowpass');voice(t,45,1.0,.13,{type:'sine',cut:220,end:70,attack:.018});}}
+    if(mode>=1&&!(ending&&i===11)&&s%4===0)kick(t,mode===3?.53:.43);
+    if(mode===0&&i!==0&&i!==12&&s===0&&localBar%2===0)kick(t,.24);
+    if(mode>=1&&(s===4||s===12))snare(t,mode===3?.16:.11);
+    if(mode>=1&&s%4===2)percussion(t,.15,.075,6700,s<8?-.32:.32);
+    if(mode>=2&&s%2===1)percussion(t,.045,.042,8500,s%4===1?-.48:.48);
+    if(fill&&mode>=1&&[11,13,14,15].includes(s))snare(t,.055+(s-11)*.015);
+    const bp=bassPatterns[mode===0?3:mode===1?0:mode===2?(i%2?5:1):2];
+    if(bp.includes(s)&&!(i===12&&localBar<6))bass(t,root+(s===15&&fill?12:0),STEP*(mode===0?2.1:mode===3?.82:1.25),mode>=2);
+    const ar=arpPatterns[mode===0?2:(i+Math.floor(localBar/4))%4][s];
+    if(ar>=0&&!(i===0&&localBar<2)){const m=notes[ar]+(s%8===7?12:0);voice(t,hz(m),STEP*(mode===0?3.0:1.65),mode>=2?.053:.046,{type:'triangle',cut:3400,end:480,pan:Math.sin(s*1.7)*.6,echo:true});}
+    if((mode>=2||i===7||i===14)&&localBar>=2){const k=leadPatterns[Math.floor(localBar/2)%3][s];if(k>=0)lead(t,notes[k]+12,STEP*(s%4===0?3.4:2.3),mode===3?.069:.045,Math.sin(s*.8)*.45,mode===3);}
+    if((ending||i===12&&localBar===profiles[i][0]-2)&&s===0)percussion(t,Math.min(1.65,BAR*.92),.12,700,.2,'bandpass',true);
+    if(i===15&&localBar>=profiles[i][0]-2&&s===0)voice(t,hz(notes[0]+12),BAR*.95,.06,{type:'sine',cut:2000,end:700,attack:.3,echo:true});
+  }
+  // Additional synth voice: a stereo FM carrier with a decaying modulation index.
+  function fm(t,m,d,amp,panVal,ratio=2){
+    const f=hz(m), carrier=ac.createOscillator(), mod=ac.createOscillator(), index=ac.createGain(), env=ac.createGain(), pan=ac.createStereoPanner();
+    carrier.frequency.value=f;mod.frequency.value=f*ratio;index.gain.setValueAtTime(f*1.45,t);index.gain.exponentialRampToValueAtTime(Math.max(1,f*.045),t+d);
+    env.gain.setValueAtTime(.0001,t);env.gain.linearRampToValueAtTime(amp,t+.008);env.gain.exponentialRampToValueAtTime(.0001,t+d);
+    pan.pan.value=panVal;mod.connect(index);index.connect(carrier.frequency);carrier.connect(env);env.connect(pan);pan.connect(dry);pan.connect(delay);
+    mod.start(t);carrier.start(t);mod.stop(t+d+.015);carrier.stop(t+d+.02);track(mod,[mod,index]);track(carrier,[carrier,env,pan]);
+  }
+  function acid(t,m,d,accent,panVal){const f=hz(m);voice(t,f,d,accent?.105:.071,{type:'sawtooth',cut:accent?2800:1250,end:Math.max(145,f*2),q:8.0,release:.037,pan:panVal,echo:true});}
+  const rhythmBank=[
+    [1,2,3,5,6,7,9,10,11,13,14,15], [0,3,6,10,13], [0,7,12], [0,2,3,6,7,9,11,14,15],
+    [2,6,10,14], [0,3,5,7,10,12,15], [0,2,5,8,10,13], [0,4,7,8,12,15]
+  ];
+  const kickBank=[[0,4,8,12],[0,6,10],[0],[0,4,8,12],[0,4,8,12],[0,3,8,11],[0,4,8,12,14],[0,4,8,12]];
+  const arpBank=[[0,2,1,3,2,1,3,2,0,2,3,1,2,0,1,3],[0,-1,2,-1,-1,1,-1,3,-1,2,-1,-1,0,-1,3,-1],[0,-1,-1,-1,2,-1,-1,3,-1,-1,1,-1,-1,-1,2,-1],[0,-1,1,3,-1,2,0,-1,3,-1,2,1,-1,0,2,-1],[0,-1,2,-1,1,3,-1,2,0,-1,3,-1,2,1,-1,3],[0,2,-1,3,-1,1,2,-1,3,1,-1,0,2,-1,1,-1],[0,-1,0,2,-1,1,-1,3,0,-1,2,-1,1,-1,3,-1],[0,-1,1,2,-1,3,-1,2,1,-1,0,2,-1,3,2,-1]];
+  function arrangeInfinite(step,t){
+    const bar=Math.floor(step/16),c=locate(bar*BAR+.00001),s=step%16,lb=bar-c.start/BAR;
+    const local=Math.max(0,Math.round(lb)), mode=c.mode, fill=local%4===3, last=local===c.bars-1, first=local===0;
+    const rng=randomFor(c.index,local+37), variant=Math.floor(rng()*4), turn=Math.floor(rng()*4), prog=progressions[c.prog], chord=chordBank[prog[local%prog.length]];
+    // The first generated phrase remains in the opening key, later acts explore related tonal centers.
+    const key=c.index===16?0:c.transpose, root=chord[0]+key, notes=chord[1].map(x=>x+key), ambient=mode===2, build=last&&mode===2;
+    const density=ambient?.48:mode===0||mode===6?1.0:.78;
+    if(s===0){pad(t,notes,BAR*.98,!ambient);if(first){voice(t,43,.85,.11,{type:'sine',cut:210,end:65,attack:.015});percussion(t,.72,.075,600,0,'lowpass');}}
+    if(kickBank[mode].includes(s)&&(!ambient||local%2===0))kick(t,ambient?.22:mode===6?.49:.43);
+    if(!ambient&&((mode===1||mode===5)?s===4||s===12||fill&&s===15:s===4||s===12))snare(t,mode===6?.14:.105);
+    if(!ambient&&s%4===2)percussion(t,.13,.061,7000,s<8?-.42:.42);
+    if(!ambient&&s%2===1&&((s+variant)%3!==0||mode===0))percussion(t,.04,.035,9000,s%4===1?-.53:.53);
+    if(fill&&!ambient&&[11,13,14,15].includes(s))snare(t,.045+(s-11)*.012);
+    const rhythm=rhythmBank[mode];
+    if(rhythm.includes(s)&&(!ambient||local%2===0)){
+      const pitch=root+(s===15&&fill?12:(mode===5||mode===7)&&s===7?7:0);
+      bass(t,pitch,STEP*(ambient?2.5:mode===0?.80:1.12),mode===0||mode===6);
+      if(mode===3)acid(t,pitch+12,STEP*(s%4===3?1.8:.92),s%4===2||fill&&s===15,Math.sin(s)*.23);
+    }
+    const ap=arpBank[mode][(s+(variant===3?4:0))%16];
+    if(ap>=0){const m=notes[(ap+turn)%4]+(s===15||mode===7?12:0);if(mode===1||mode===5||mode===6)fm(t,m,STEP*(1.4+variant*.25),.051*density,Math.sin(s*1.7)*.6,mode===6?2.5:2);else voice(t,hz(m),STEP*(ambient?3.7:1.6),.048*density,{type:ambient?'sine':'triangle',cut:3300,end:460,pan:Math.sin(s*1.4)*.6,echo:true});}
+    if(!ambient&&local>=1){const lp=leadPatterns[(variant+Math.floor(local/2))%3][s];if(lp>=0&&(mode!==3||local%2===1))lead(t,notes[lp]+12,STEP*(s%4===0?3.2:2.0),.049*density,Math.sin(s*.7)*.52,mode===0||mode===4);}
+    if(mode===6&&[3,7,11,15].includes(s)){fm(t,root+24,.10,.037,Math.sin(s)*.7,3.5);percussion(t,.10,.045,2100,Math.cos(s)*.6,'bandpass');}
+    if(mode===5&&[5,10,15].includes(s))voice(t,hz(root+19),STEP*1.25,.055,{type:'square',cut:1100,end:230,q:1.3,pan:Math.sin(s)*.44});
+    if(mode===7&&s===0&&local%2===0)lead(t,notes[2]+12,BAR*.75,.052,.25,false);
+    if(ambient&&s===8)fm(t,notes[(local+turn)%4]+12,STEP*6,.047,.5,1.5);
+    if((last||build)&&s===0)percussion(t,1.5,.095,640,.2,'bandpass',true);
+    if(c.kind===1&&local===Math.floor(c.bars/2)&&s===0){voice(t,37,1.15,.145,{type:'sine',cut:170,end:55,attack:.018});percussion(t,.95,.10,450,-.2,'lowpass');}
+    if(c.kind===2&&fill&&s===14)fm(t,notes[2]+24,.19,.043,-.55,3);
+  }
+  function stopScheduled(){clearInterval(timer);timer=0;for(const o of nodes){try{o.stop();}catch{}try{o.disconnect();}catch{}}nodes.clear();for(const n of graph){try{n.disconnect();}catch{}}graph=[];}
+  function nowTime(){return playing?Math.max(0,ac.currentTime-origin):offset;}
+  function scheduler(){if(!playing)return;const limit=ac.currentTime+.19;nextStep=Math.max(nextStep,Math.ceil((ac.currentTime-origin-.015)/STEP),0);let budget=12;while(budget--&&origin+nextStep*STEP<limit){const t=origin+nextStep*STEP;if(t>=ac.currentTime-.015)arrange(nextStep,Math.max(t,ac.currentTime+.002));nextStep++;}}
+  async function playAt(t){const gen=++generation;playing=false;offset=Math.max(0,Number.isFinite(t)?t:0);stopScheduled();try{initAudio();await ac.resume();if(gen!==generation)return;connectGraph();origin=ac.currentTime+.055-offset;nextStep=Math.ceil((offset-.0001)/STEP);dry.gain.setValueAtTime(1,ac.currentTime);playing=true;overlay.classList.add('hidden');document.body.classList.add('playing');scheduler();timer=setInterval(scheduler,25);}catch(e){fail('Audio initialization: '+e);}}
+  function pause(){offset=nowTime();playing=false;generation++;stopScheduled();}
+  function menu(){pause();offset=0;dirty=true;overlay.classList.remove('hidden');document.body.classList.remove('playing');hud.style.display='none';}
+  startBtn.addEventListener('click',()=>playAt(offset));
+  document.addEventListener('keydown',e=>{if(e.repeat||e.target===quality)return;const k=e.key.toLowerCase();if([' ','arrowleft','arrowright'].includes(k))e.preventDefault();
+    if(k==='f'){if(document.fullscreenElement)document.exitFullscreen().catch(()=>{});else document.documentElement.requestFullscreen().catch(()=>{});}
+    else if(k==='m'){muted=!muted;if(master)master.gain.setTargetAtTime(muted?0:.65,ac.currentTime,.02);}
+    else if(k===' '&&overlay.classList.contains('hidden')){if(playing)pause();else playAt(offset);}
+    else if(k==='r')playAt(0);else if(k==='n'){newUniverse();playAt(TOTAL);}else if(k==='q'){quality.selectedIndex=(quality.selectedIndex+1)%quality.options.length;resize();dirty=true;}
+    else if(k==='arrowright'||k==='arrowleft'){const i=Math.max(0,locate(nowTime()).index+(k==='arrowright'?1:-1));playAt(chapterStart(i));}
+    else if(k==='h'){hud.style.display=hud.style.display==='block'?'none':'block';dirty=true;}else if(k==='escape')menu();
+  });
+  let last=performance.now(),fps=60;
+  function render(t){
+    const cam=timeline(t), beat=Math.pow(1-(t/STEP/4)%1,3);let bass=0,mid=.25,high=.15;
+    if(analyser&&playing){analyser.getByteFrequencyData(spectrum);const binHz=ac.sampleRate/analyser.fftSize;const avg=(lo,hi)=>{let a=Math.max(1,Math.floor(lo/binHz)),b=Math.min(spectrum.length,Math.ceil(hi/binHz));let sum=0;for(let j=a;j<b;j++)sum+=spectrum[j];return sum/Math.max(1,b-a)/255;};[avg(40,240),avg(240,2200),avg(2200,10000)].forEach((x,j)=>bands[j]=mix(bands[j],x,.24));[bass,mid,high]=bands;}
+    gl.uniform2f(uRes,canvas.width,canvas.height);gl.uniform1f(uTime,t%(2000*Math.PI));gl.uniform1f(uBeat,beat*((cam.act<0?cam.music===0:cam.music===2)?.35:1));gl.uniform1f(uBass,bass);gl.uniform1f(uMid,mid);gl.uniform1f(uHigh,high);
+    gl.uniform3fv(uCamPos,cam.pos);gl.uniform3fv(uCamFwd,cam.fwd);gl.uniform3fv(uCamRight,cam.right);gl.uniform3fv(uCamUp,cam.up);gl.uniform4fv(locRoute,cam.route);gl.uniform4fv(locPart,cam.part);gl.uniform4fv(locStyle,cam.style);gl.uniform1f(locTravel,cam.z);gl.uniform4fv(locEvolution,cam.evolution);gl.uniform4fv(locEvent,cam.events);gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
+    if(hud.style.display==='block')hud.textContent=`${names[cam.i]} · Chapter ${cam.index+1}\n${cam.act<0?"Composed prologue":"Infinite act "+(cam.act+1)+" · "+styles[cam.music]}\n${t.toFixed(1)} s · ${fps.toFixed(0)} fps · ${canvas.width} × ${canvas.height}\nZ ${cam.z.toFixed(1)} · flight radius ${cam.route[3].toFixed(2)}\nSeed ${seed.toString(16).padStart(8,"0")} · ${nodes.size} audio voices · ${muted?"Muted":"Audio"}`;
+  }
+  let dirty=true;quality.addEventListener('change',()=>dirty=true);window.addEventListener('resize',()=>dirty=true);
+  function frame(now){const t=nowTime();fps=mix(fps,1000/Math.max(1,now-last),.08);last=now;if(playing||dirty){render(t);dirty=false;}requestAnimationFrame(frame);}
+  // Deterministic offline geometry diagnostics; no access to external resources.
+  window.__chrono={timeline,starts:starts.map(v=>v*BAR),total:TOTAL,render,playAt,nowTime,gl,locate,chapterStart,act,cacheSize:()=>cache.size,diagnostics:()=>({playing,voices:nodes.size,nextStep,seed,cache:cache.size}),setSeed:v=>{seed=v>>>0;cache.clear();}};
+  requestAnimationFrame(frame);
+
+})();
+</script>
+</body>
+</html>
