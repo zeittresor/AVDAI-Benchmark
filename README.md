@@ -23,3 +23,11 @@ Output examples for "CHRONO-LATTICE_v7_(google_gemini_web).html":
 <img width="2560" height="1080" alt="2026-11-25 00_26_45-Greenshot" src="https://github.com/user-attachments/assets/a7233b95-ec3f-45d1-847e-43111db26d37" />
 <img width="2560" height="1080" alt="2026-11-25 00_26_17-Greenshot" src="https://github.com/user-attachments/assets/97e7a02d-9a64-4404-822f-fc8deeed7983" />
 <img width="2560" height="1080" alt="2026-11-25 00_26_29-Greenshot" src="https://github.com/user-attachments/assets/5f061be2-925a-4a36-a910-edd73a885670" />
+
+
+Output examples for "CHRONO-LATTICE_v9_Infinite_Resonance_(combined_gemini_with_chatgpt6_2_hight).html":
+
+<img width="2560" height="1080" alt="2026-11-25 12_17_51-Greenshot" src="https://github.com/user-attachments/assets/ac9a5512-1be6-49aa-aae7-9a7c17eef42a" />
+<img width="2560" height="1080" alt="2026-11-25 12_29_33-Greenshot" src="https://github.com/user-attachments/assets/9b5e9e25-70e7-49c6-a1ae-f2f651bfed7d" />
+<img width="2560" height="1080" alt="2026-11-25 12_11_21-Greenshot" src="https://github.com/user-attachments/assets/15c79b55-6dd1-4f29-ad3b-65268f11919f" />
+
